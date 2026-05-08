@@ -172,6 +172,7 @@ export function evaluateStrategyV3(candles) {
   const EMA_TREND = 50;  // Más reactiva que 100
   const ADX_PERIOD = 14;
   const RSI_PERIOD = 14;
+  const MFI_PERIOD = 14;
 
   if (closes.length < 105) return 'HOLD';
 
@@ -189,11 +190,21 @@ export function evaluateStrategyV3(candles) {
     close: closes
   });
 
-  if (adxValues.length < 2 || emaFast.length < 3 || emaSlow.length < 3) return 'HOLD';
+  // MFI — Confirmación de volumen
+  const mfiValues = MFI.calculate({
+    period: MFI_PERIOD,
+    high: highs,
+    low: lows,
+    close: closes,
+    volume: volumes
+  });
+
+  if (adxValues.length < 2 || mfiValues.length === 0 || emaFast.length < 3 || emaSlow.length < 3) return 'HOLD';
 
   const price = closes[closes.length - 1];
   const rsiNow = rsi[rsi.length - 1];
   const adxNow = adxValues[adxValues.length - 1].adx;
+  const mfiNow = mfiValues[mfiValues.length - 1];
 
   // EMAs
   const fastNow = emaFast[emaFast.length - 1];
@@ -211,13 +222,14 @@ export function evaluateStrategyV3(candles) {
   const hasTrend = adxNow > 20;           // Hay una tendencia real (no choppy market)
   const isUptrend = price > trendNow;      // Precio sobre EMA 50
   const rsiHealthy = rsiNow > 40 && rsiNow < 65;
+  const mfiHealthy = mfiNow > 40;          // Confirmación de volumen de compra
 
-  // COMPRA: Golden Cross confirmado + ADX confirma tendencia + RSI saludable + uptrend
-  if (isGoldenCross && hasTrend && rsiHealthy && isUptrend) {
+  // COMPRA: Golden Cross confirmado + ADX confirma tendencia + RSI saludable + uptrend + MFI saludable
+  if (isGoldenCross && hasTrend && rsiHealthy && isUptrend && mfiHealthy) {
     return 'BUY';
   }
   // VENTA: SOLO por RSI extremo — el trailing stop del engine maneja el resto
-  else if (rsiNow > 78) {
+  else if (rsiNow > 80) {
     return 'SELL';
   }
 

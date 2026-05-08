@@ -12,20 +12,21 @@ El bot está construido en Node.js y diseñado para ejecutarse como una **funci�
 
 El bot utiliza actualmente la **Estrategia V3**, optimizada mediante backtesting intensivo.
 
-### 2.1 Lógica de Entrada (V3 - ADX + Momentum)
+### 2.1 Lógica de Entrada (V3 - ADX + Momentum + Volumen)
 *   **Temporalidad:** 15 minutos (`15m`).
 *   **Filtro de Tendencia (ADX):** Solo opera si el **ADX > 20**. Esto asegura que el bot no entre en mercados laterales o ruidosos.
 *   **Cruce de Medias (EMA 12/26):** Cruce alcista confirmado durante 2 velas consecutivas para evitar "falsos cruces".
 *   **Filtro de Precio (EMA 50):** El precio debe estar por encima de la EMA 50 para confirmar una tendencia alcista saludable.
 *   **RSI (Relative Strength Index):** El RSI debe estar en zona de momentum saludable (**40 - 65**).
+*   **Filtro de Volumen (MFI):** El Money Flow Index debe ser **> 40** para confirmar que el movimiento viene respaldado por presión compradora real.
 
 ### 2.2 Gestión de Riesgo Dinámica (Trailing Stop)
 A diferencia de las versiones anteriores con objetivos fijos, la V3 utiliza una gestión inteligente:
 *   **Stop Loss (SL):** -2.5% (Ajustado para absorber el ruido del mercado).
-*   **Trailing Stop Activation:** Se activa automáticamente al alcanzar un **+1.5%** de beneficio.
+*   **Trailing Stop Activation:** Se activa automáticamente al alcanzar un **+1.0%** de beneficio.
 *   **Trailing Distance:** Una vez activado, el bot protege el **60% del beneficio máximo** alcanzado. Si el precio retrocede por debajo de ese nivel dinámico, la posición se cierra.
 *   **Take Profit (TP):** +5.0% (Como salida de emergencia por beneficio rápido).
-*   **RSI Exit:** Si el RSI supera **78** (sobrecompra extrema), el bot cierra la posición preventivamente.
+*   **RSI Exit:** Si el RSI supera **80** (sobrecompra extrema), el bot cierra la posición preventivamente.
 
 ---
 
