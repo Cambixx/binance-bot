@@ -1,0 +1,28 @@
+{
+  "name": "binance-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "sync": "npx netlify blobs:get shadow_trading_state bot_state_v2 --output shadow_trades_sync.json",
+    "reset": "npx netlify blobs:delete shadow_trading_state bot_state_v2",
+    "clear-blobs": "npm run reset",
+    "backtest": "node backtest.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@netlify/blobs": "^10.7.4",
+    "@netlify/functions": "^5.2.0",
+    "axios": "^1.15.2",
+    "crypto-js": "^4.2.0",
+    "dotenv": "^17.4.2",
+    "technicalindicators": "^3.1.0"
+  },
+  "devDependencies": {
+    "netlify-cli": "^26.0.0"
+  }
+}
