@@ -8,7 +8,8 @@
     "sync": "npx netlify blobs:get shadow_trading_state bot_state_v2 --output shadow_trades_sync.json",
     "reset": "npx netlify blobs:delete shadow_trading_state bot_state_v2",
     "clear-blobs": "npm run reset",
-    "backtest": "node backtest.js"
+    "backtest": "node backtest.js",
+    "shadow-report": "node shadow-report.js"
   },
   "keywords": [],
   "author": "",

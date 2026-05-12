@@ -1,0 +1,306 @@
+{
+  "summary": {
+    "reportType": "Shadow Mode",
+    "generatedAt": "2026-05-12T06:24:34.862Z",
+    "stateSource": "/Users/carlosrabago/Documents/binance-bot/shadow_trades_sync.json",
+    "blobStore": "shadow_trading_state",
+    "blobKey": "bot_state_v2",
+    "initialBalance": 5000,
+    "availableBalance": 2937.33,
+    "investedCost": 2081.91,
+    "currentMarketValue": 2065.42,
+    "currentTotalEquity": 5002.75,
+    "realizedProfit": 19.26,
+    "unrealizedProfit": -16.49,
+    "totalProfit": 2.75,
+    "roi": 0.06,
+    "activeSince": "2026-05-09T17:47:15.672Z",
+    "totalTrades": 9,
+    "winningTrades": 6,
+    "losingTrades": 3,
+    "winRate": 66.67,
+    "profitFactor": 1.37,
+    "avgWin": 11.92,
+    "avgLoss": 17.43,
+    "expectancy": 2.14,
+    "avgDurationHours": 9,
+    "maxDrawdown": 1.36,
+    "openPositionsCount": 3,
+    "trailingActiveCount": 0,
+    "byReason": {
+      "TRAILING_STOP": 5,
+      "SIGNAL": 2,
+      "STOP_LOSS": 2
+    },
+    "bySymbol": {
+      "SUIUSDC": {
+        "trades": 2,
+        "profit": 46.2,
+        "wins": 2
+      },
+      "TONUSDC": {
+        "trades": 1,
+        "profit": 10.38,
+        "wins": 1
+      },
+      "TAOUSDC": {
+        "trades": 2,
+        "profit": 2.44,
+        "wins": 1
+      },
+      "LINKUSDC": {
+        "trades": 1,
+        "profit": 3.69,
+        "wins": 1
+      },
+      "ETHUSDC": {
+        "trades": 2,
+        "profit": -18.25,
+        "wins": 1
+      },
+      "ZECUSDC": {
+        "trades": 1,
+        "profit": -25.2,
+        "wins": 0
+      }
+    },
+    "reconstructionNote": "La curva y el drawdown se reconstruyen con cierres realizados y un snapshot actual de posiciones abiertas."
+  },
+  "trades": [
+    {
+      "symbol": "SUIUSDC",
+      "buyPrice": 1.0666,
+      "sellPrice": 1.0771,
+      "amount": 937.5585974123383,
+      "profit": 9.84,
+      "profitPct": 0.98,
+      "buyTime": "2026-05-09T17:47:15.672Z",
+      "sellTime": "2026-05-10T00:47:07.087Z",
+      "reason": "TRAILING_STOP"
+    },
+    {
+      "symbol": "TONUSDC",
+      "buyPrice": 2.467,
+      "sellPrice": 2.517,
+      "amount": 207.5395216862586,
+      "profit": 10.38,
+      "profitPct": 2.03,
+      "buyTime": "2026-05-09T22:03:35.134Z",
+      "sellTime": "2026-05-10T04:31:12.181Z",
+      "reason": "TRAILING_STOP"
+    },
+    {
+      "symbol": "TAOUSDC",
+      "buyPrice": 310.2,
+      "sellPrice": 311.3,
+      "amount": 2.5789813023855577,
+      "profit": 2.84,
+      "profitPct": 0.35,
+      "buyTime": "2026-05-09T18:15:20.783Z",
+      "sellTime": "2026-05-10T04:45:26.713Z",
+      "reason": "TRAILING_STOP"
+    },
+    {
+      "symbol": "SUIUSDC",
+      "buyPrice": 1.0824,
+      "sellPrice": 1.1273,
+      "amount": 809.877720027673,
+      "profit": 36.36,
+      "profitPct": 4.15,
+      "buyTime": "2026-05-10T07:16:02.628Z",
+      "sellTime": "2026-05-10T08:46:46.087Z",
+      "reason": "SIGNAL"
+    },
+    {
+      "symbol": "LINKUSDC",
+      "buyPrice": 10.42,
+      "sellPrice": 10.48,
+      "amount": 61.42034548944338,
+      "profit": 3.69,
+      "profitPct": 0.58,
+      "buyTime": "2026-05-09T18:46:32.914Z",
+      "sellTime": "2026-05-10T10:15:21.915Z",
+      "reason": "TRAILING_STOP"
+    },
+    {
+      "symbol": "ETHUSDC",
+      "buyPrice": 2329.07,
+      "sellPrice": 2348.48,
+      "amount": 0.43477499183351087,
+      "profit": 8.44,
+      "profitPct": 0.83,
+      "buyTime": "2026-05-10T14:06:33.052Z",
+      "sellTime": "2026-05-10T16:03:21.410Z",
+      "reason": "SIGNAL"
+    },
+    {
+      "symbol": "ZECUSDC",
+      "buyPrice": 588.83,
+      "sellPrice": 570.54,
+      "amount": 1.378067267969326,
+      "profit": -25.2,
+      "profitPct": -3.11,
+      "buyTime": "2026-05-11T00:15:27.633Z",
+      "sellTime": "2026-05-11T06:46:16.488Z",
+      "reason": "STOP_LOSS"
+    },
+    {
+      "symbol": "TAOUSDC",
+      "buyPrice": 322.6,
+      "sellPrice": 322.4,
+      "amount": 2.0122686903865548,
+      "profit": -0.4,
+      "profitPct": -0.06,
+      "buyTime": "2026-05-11T06:16:51.299Z",
+      "sellTime": "2026-05-11T11:01:12.561Z",
+      "reason": "TRAILING_STOP"
+    },
+    {
+      "symbol": "ETHUSDC",
+      "buyPrice": 2369.56,
+      "sellPrice": 2307.2,
+      "amount": 0.42805803049847774,
+      "profit": -26.69,
+      "profitPct": -2.63,
+      "buyTime": "2026-05-10T22:46:15.682Z",
+      "sellTime": "2026-05-12T01:45:49.618Z",
+      "reason": "STOP_LOSS"
+    }
+  ],
+  "openPositions": [
+    {
+      "symbol": "TAOUSDC",
+      "amount": 2.2833701489810245,
+      "buyPrice": 321.6,
+      "currentPrice": 320.5,
+      "investedUSDC": 734.33,
+      "marketValue": 731.82,
+      "unrealizedProfit": -2.51,
+      "unrealizedProfitPct": -0.34,
+      "buyTime": "2026-05-12T06:06:47.541Z",
+      "peakPrice": 321.6,
+      "trailingActivated": false,
+      "trailingStopPrice": null
+    },
+    {
+      "symbol": "ADAUSDC",
+      "amount": 2412.031384771501,
+      "buyPrice": 0.2805,
+      "currentPrice": 0.2779,
+      "investedUSDC": 676.57,
+      "marketValue": 670.3,
+      "unrealizedProfit": -6.27,
+      "unrealizedProfitPct": -0.93,
+      "buyTime": "2026-05-11T10:30:55.741Z",
+      "peakPrice": 0.2829,
+      "trailingActivated": false,
+      "trailingStopPrice": null
+    },
+    {
+      "symbol": "PEPEUSDC",
+      "amount": 154255385.72387353,
+      "buyPrice": 0.00000435,
+      "currentPrice": 0.0000043,
+      "investedUSDC": 671.01,
+      "marketValue": 663.3,
+      "unrealizedProfit": -7.71,
+      "unrealizedProfitPct": -1.15,
+      "buyTime": "2026-05-11T16:00:52.206Z",
+      "peakPrice": 0.000004,
+      "trailingActivated": false,
+      "trailingStopPrice": null
+    }
+  ],
+  "equityCurve": [
+    {
+      "time": 1778348835672,
+      "equity": 5000
+    },
+    {
+      "time": 1778374027087,
+      "equity": 5009.84
+    },
+    {
+      "time": 1778387472181,
+      "equity": 5020.22
+    },
+    {
+      "time": 1778388326713,
+      "equity": 5023.06
+    },
+    {
+      "time": 1778402806087,
+      "equity": 5059.42
+    },
+    {
+      "time": 1778408121915,
+      "equity": 5063.11
+    },
+    {
+      "time": 1778429001410,
+      "equity": 5071.55
+    },
+    {
+      "time": 1778481976488,
+      "equity": 5046.35
+    },
+    {
+      "time": 1778497272561,
+      "equity": 5045.95
+    },
+    {
+      "time": 1778550349618,
+      "equity": 5019.26
+    },
+    {
+      "time": 1778567074862,
+      "equity": 5002.75
+    }
+  ],
+  "drawdownCurve": [
+    {
+      "time": 1778348835672,
+      "drawdown": 0
+    },
+    {
+      "time": 1778374027087,
+      "drawdown": 0
+    },
+    {
+      "time": 1778387472181,
+      "drawdown": 0
+    },
+    {
+      "time": 1778388326713,
+      "drawdown": 0
+    },
+    {
+      "time": 1778402806087,
+      "drawdown": 0
+    },
+    {
+      "time": 1778408121915,
+      "drawdown": 0
+    },
+    {
+      "time": 1778429001410,
+      "drawdown": 0
+    },
+    {
+      "time": 1778481976488,
+      "drawdown": 0.5
+    },
+    {
+      "time": 1778497272561,
+      "drawdown": 0.5
+    },
+    {
+      "time": 1778550349618,
+      "drawdown": 1.03
+    },
+    {
+      "time": 1778567074862,
+      "drawdown": 1.36
+    }
+  ]
+}

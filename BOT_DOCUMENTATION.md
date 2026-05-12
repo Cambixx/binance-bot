@@ -61,6 +61,7 @@ Cada ejecución genera un archivo **`backtest-report-output.html`**. Al abrirlo 
 ## 5. Referencia de Comandos
 *   **`npm run backtest`**: Ejecuta simulación con los últimos resultados.
 *   **`npm run backtest -- --months=N`**: Simulación de N meses atrás.
+*   **`npm run shadow-report`**: Descarga `bot_state_v2` desde Netlify Blobs y genera `shadow-report-output.html` con el estado real del bot.
 *   **`npm run sync`**: Descarga el estado de la nube a un archivo local para auditoría.
 *   **`npm run reset`**: Borra todo el historial y resetea el capital a 5000 USDC.
 *   **`npm run clear-blobs`**: Alias de `reset`.
