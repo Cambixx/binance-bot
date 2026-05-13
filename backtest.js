@@ -5,7 +5,8 @@ import { exec } from 'child_process';
 
 // Blacklist centralizada (igual que bot.js)
 const BLACKLIST = [
-  'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST'
+  'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
+  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ'
 ];
 
 async function main() {

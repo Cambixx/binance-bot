@@ -6,14 +6,15 @@ import { evaluateStrategyV3 as evaluateStrategy } from './indicators.js';
 const INTERVAL = '15m'; 
 const TOP_COINS_LIMIT = 10;
 const BLACKLIST = [
-  'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST'
+  'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
+  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ'
 ];
 
 // Configuración de Riesgo V3
 const RISK_TP = 5.0;            // Take Profit
 const RISK_SL = 2.5;            // Stop Loss (Aumentado a 2.5% para dar aire al trade)
-const TRAIL_ACTIVATION = 1.0;   // Activa trailing al +1.0%
-const TRAIL_DISTANCE = 0.6;     // Protege el 60% del pico de profit
+const TRAIL_ACTIVATION = 1.5;   // Activa trailing al +1.5% (V3 optimizado)
+const TRAIL_DISTANCE = 0.45;    // Protege el 45% del pico, deja 55% de respiración
 
 export async function runBot() {
   console.log('🤖 Iniciando Binance Shadow Bot V3 (ADX + Trailing)...');

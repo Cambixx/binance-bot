@@ -5,7 +5,8 @@ const BINANCE_API_BASE = 'https://data-api.binance.vision/api/v3';
 
 // Misma Blacklist que bot.js para coherencia total
 const BLACKLIST = [
-  'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST'
+  'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
+  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ'
 ];
 
 class BacktestEngine {
@@ -19,8 +20,8 @@ class BacktestEngine {
     // Risk management
     this.takeProfitPct = options.takeProfitPct || 5.0;
     this.stopLossPct = options.stopLossPct || 2.5;
-    this.trailingActivation = options.trailingActivation || 1.0; // A +1.0%, activar trailing
-    this.trailingDistance = options.trailingDistance || 0.6;      // Trail a 60% del pico (más ajustado)
+    this.trailingActivation = options.trailingActivation || 1.5; // A +1.5%, activar trailing (V3 optimizado)
+    this.trailingDistance = options.trailingDistance || 0.45;     // Trail a 45% del pico, 55% de respiración
     this.cooldownCandles = options.cooldownCandles || 12; // 12 velas (3h) de cooldown tras un SL
 
     this.state = {
