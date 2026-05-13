@@ -23,10 +23,22 @@ El bot utiliza actualmente la **Estrategia V3**, optimizada mediante backtesting
 ### 2.2 Gestión de Riesgo Dinámica (Trailing Stop)
 A diferencia de las versiones anteriores con objetivos fijos, la V3 utiliza una gestión inteligente:
 *   **Stop Loss (SL):** -2.5% (Ajustado para absorber el ruido del mercado).
-*   **Trailing Stop Activation:** Se activa automáticamente al alcanzar un **+1.0%** de beneficio.
-*   **Trailing Distance:** Una vez activado, el bot protege el **60% del beneficio máximo** alcanzado. Si el precio retrocede por debajo de ese nivel dinámico, la posición se cierra.
+*   **Trailing Stop Activation:** Se activa automáticamente al alcanzar un **+1.5%** de beneficio. *(Optimizado el 13/05/2026 — antes 1.0%, causaba activaciones prematuras en micro-ganancias).*
+*   **Trailing Distance:** Una vez activado, el bot protege el **45% del beneficio máximo** alcanzado. Si el precio retrocede por debajo de ese nivel dinámico, la posición se cierra. *(Optimizado el 13/05/2026 — antes 60%, demasiado agresivo; ahora deja 55% de respiración al trade para alcanzar TPs).*
 *   **Take Profit (TP):** +5.0% (Como salida de emergencia por beneficio rápido).
 *   **RSI Exit:** Si el RSI supera **80** (sobrecompra extrema), el bot cierra la posición preventivamente.
+
+### 2.3 Blacklist de Activos
+Los siguientes activos están excluidos del escaneo:
+*   **Stablecoins/Fiat:** LUNC, USD1, FDUSD, TUSD, DAI, EUR, GBP, BUSD, USDP, USTC, TST.
+*   **Bajo rendimiento V3 (añadidos 13/05/2026):** TAO, ZEC, PEPE, ADA, INJ. Estos activos mostraron un 75-100% de tasa de pérdidas en shadow trading, con TAO acumulando -$34.95 en 4 trades (50% de las pérdidas totales).
+
+### 2.4 Resultados de Backtest V3 Optimizado (24 meses, 5 monedas)
+*   **ROI:** +23.31% | **Balance Final:** 6,165.64 USDC
+*   **Win Rate:** 62.07% | **Profit Factor:** 1.11
+*   **Expectancy:** +$1.02/trade | **Max Drawdown:** -9.24%
+*   **Trades:** 1,139 (707W / 432L)
+*   **Mejora clave:** Take Profits pasaron de 23 → 66 (+187%) gracias al trailing más holgado.
 
 ---
 
