@@ -59,7 +59,7 @@ export async function runBot() {
 
       if (signal === 'BUY' && !hasPos && canOpenNewPosition) {
         console.log(`\n🚨 [V3 SIGNAL] COMPRA DETECTADA: ${symbol} a ${currentPrice}`);
-        await shadowTrader.buy(symbol, currentPrice);
+        await shadowTrader.buy(symbol, currentPrice, { trailActivationPct: TRAIL_ACTIVATION });
       } 
       else if (signal === 'SELL' && hasPos) {
         console.log(`\n🚨 [V3 SIGNAL] VENTA (RSI SOBRECOMPRA): ${symbol} a ${currentPrice}`);

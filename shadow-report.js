@@ -9,7 +9,7 @@ const DEFAULT_SYNC_FILE = 'shadow_trades_sync.json';
 const DEFAULT_DATA_FILE = 'shadow-report-results.json';
 const DEFAULT_HTML_OUTPUT = 'shadow-report-output.html';
 const INITIAL_BALANCE = 5000;
-const TRAIL_DISTANCE = 0.6;
+const TRAIL_DISTANCE = 0.45;
 
 function parseArgs() {
   const args = process.argv.slice(2);

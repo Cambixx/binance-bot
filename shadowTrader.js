@@ -83,7 +83,7 @@ class ShadowTrader {
     };
   }
 
-  async buy(symbol, price) {
+  async buy(symbol, price, options = {}) {
     const state = await this._loadState();
 
     if (state.openPositions[symbol]) {
@@ -108,7 +108,8 @@ class ShadowTrader {
     // Niveles sugeridos para operativa manual
     const tpPrice = price * 1.05;
     const slPrice = price * 0.975;
-    const trailActivationPrice = price * 1.01;
+    const trailActivationPct = Number(options.trailActivationPct ?? 1.0);
+    const trailActivationPrice = price * (1 + trailActivationPct / 100);
 
     console.log(`🟢 [SIGNAL] ${symbol} a ${price} USDC (Rastreo activado)`);
     await this._saveState(state);
@@ -121,7 +122,7 @@ class ShadowTrader {
         `📊 <b>Niveles Sugeridos (Estrategia V3):</b>\n` +
         `🎯 <b>Take Profit:</b> ${tpPrice.toFixed(4)} (+5%)\n` +
         `🛑 <b>Stop Loss:</b> ${slPrice.toFixed(4)} (-2.5%)\n` +
-        `📈 <b>Activar Trailing:</b> ${trailActivationPrice.toFixed(4)} (+1.0%)\n\n` +
+        `📈 <b>Activar Trailing:</b> ${trailActivationPrice.toFixed(4)} (+${trailActivationPct.toFixed(1)}%)\n\n` +
         `<i>Nota: Operación registrada en el simulador para seguimiento de salida.</i>`
       );
     } catch (error) {
