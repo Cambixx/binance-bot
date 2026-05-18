@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "netlify dev",
     "sync": "npx netlify blobs:get shadow_trading_state bot_state_v2 --output shadow_trades_sync.json",
     "reset": "npx netlify blobs:delete shadow_trading_state bot_state_v2",
     "clear-blobs": "npm run reset",
