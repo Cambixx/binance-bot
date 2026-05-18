@@ -6,7 +6,7 @@ const BINANCE_API_BASE = 'https://data-api.binance.vision/api/v3';
 // Misma Blacklist que bot.js para coherencia total
 const BLACKLIST = [
   'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
-  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ'
+  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE'
 ];
 
 class BacktestEngine {
@@ -17,12 +17,16 @@ class BacktestEngine {
     this.months = options.months || 3;
     this.strategyVersion = options.strategyVersion || 3; // 1, 2, or 3
 
-    // Risk management
+    // Risk management (post-audit 2026-05-18)
     this.takeProfitPct = options.takeProfitPct || 5.0;
-    this.stopLossPct = options.stopLossPct || 2.5;
-    this.trailingActivation = options.trailingActivation || 1.5; // A +1.5%, activar trailing (V3 optimizado)
-    this.trailingDistance = options.trailingDistance || 0.45;     // Trail a 45% del pico, 55% de respiración
+    this.stopLossPct = options.stopLossPct || 3.0;
+    this.trailingActivation = options.trailingActivation || 1.5;
+    this.trailingDistance = options.trailingDistance || 0.30;     // Protege 30% del pico (deja más aire al upside)
     this.cooldownCandles = options.cooldownCandles || 12; // 12 velas (3h) de cooldown tras un SL
+
+    // Validación out-of-sample: split temporal train/holdout
+    this.oosSplitRatio = options.oosSplitRatio ?? 0.7; // 70% train, 30% holdout
+    this.splitTime = null;  // se calcula en run() una vez conocidos los datos
 
     this.state = {
       balance: this.initialBalance,
@@ -106,6 +110,15 @@ class BacktestEngine {
     }
     allEvents.sort((a, b) => a.time - b.time);
 
+    // Calcular timestamp de split train/holdout
+    if (allEvents.length > 0) {
+      const startTime = allEvents[0].time;
+      const endTime = allEvents[allEvents.length - 1].time;
+      this.splitTime = startTime + (endTime - startTime) * this.oosSplitRatio;
+      const splitDate = new Date(this.splitTime).toISOString().slice(0, 10);
+      console.log(`🔀 OOS split (${(this.oosSplitRatio*100).toFixed(0)}/${((1-this.oosSplitRatio)*100).toFixed(0)}): train hasta ${splitDate}, holdout después`);
+    }
+
     // Buffers OHLCV por símbolo (V3 necesita high, low, volume además de close)
     const candleBuffers = {};
     const currentPrices = {};
@@ -180,7 +193,7 @@ class BacktestEngine {
           // SL = precio_pico × (1 - (1 - trailingDistance) × distancia_original)
           // Simplificado: trail al X% del beneficio máximo alcanzado
           const peakProfit = ((pos.peakPrice - pos.buyPrice) / pos.buyPrice) * 100;
-          const trailLevel = peakProfit * this.trailingDistance; // Proteger 60% del pico
+          const trailLevel = peakProfit * this.trailingDistance;
           pos.trailingSL = pos.buyPrice * (1 + trailLevel / 100);
         }
 
@@ -234,6 +247,8 @@ class BacktestEngine {
     const profitPct = (profit / pos.invested) * 100;
 
     this.state.balance += returnAmount;
+    const buyTimeMs = new Date(pos.time).getTime();
+    const phase = (this.splitTime && buyTimeMs >= this.splitTime) ? 'holdout' : 'train';
     this.state.tradeHistory.push({
       symbol,
       buyPrice: pos.buyPrice,
@@ -242,7 +257,8 @@ class BacktestEngine {
       profitPct: parseFloat(profitPct.toFixed(2)),
       buyTime: pos.time,
       sellTime: new Date(time).toISOString(),
-      reason
+      reason,
+      phase
     });
 
     delete this.state.openPositions[symbol];
@@ -262,51 +278,44 @@ class BacktestEngine {
     this.state.equityCurve.push({ time, equity: parseFloat(totalEquity.toFixed(2)) });
   }
 
-  generateReport() {
-    const strategyNames = { 1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)' };
-
-    const totalTrades = this.state.tradeHistory.length;
-    const winners = this.state.tradeHistory.filter(t => t.profit > 0);
-    const losers = this.state.tradeHistory.filter(t => t.profit <= 0);
+  computeMetrics(trades, balanceStart, balanceEnd, equityCurveSubset) {
+    const totalTrades = trades.length;
+    const winners = trades.filter(t => t.profit > 0);
+    const losers = trades.filter(t => t.profit <= 0);
     const winRate = totalTrades > 0 ? (winners.length / totalTrades) * 100 : 0;
-    
-    const totalProfit = parseFloat((this.state.balance - this.initialBalance).toFixed(2));
-    const roi = (totalProfit / this.initialBalance) * 100;
+
+    const totalProfit = parseFloat((balanceEnd - balanceStart).toFixed(2));
+    const roi = balanceStart > 0 ? (totalProfit / balanceStart) * 100 : 0;
 
     const grossProfit = winners.reduce((s, t) => s + t.profit, 0);
     const grossLoss = Math.abs(losers.reduce((s, t) => s + t.profit, 0));
     const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0;
 
-    let maxEquity = this.initialBalance;
+    let maxEquity = balanceStart;
     let maxDD = 0;
-    const drawdownCurve = [];
-    this.state.equityCurve.forEach(p => {
+    (equityCurveSubset || []).forEach(p => {
       if (p.equity > maxEquity) maxEquity = p.equity;
       const dd = (maxEquity - p.equity) / maxEquity * 100;
       if (dd > maxDD) maxDD = dd;
-      drawdownCurve.push({ time: p.time, drawdown: parseFloat(dd.toFixed(2)) });
     });
 
+    const avgWin = winners.length > 0 ? grossProfit / winners.length : 0;
+    const avgLoss = losers.length > 0 ? grossLoss / losers.length : 0;
+    const expectancy = totalTrades > 0
+      ? ((winRate / 100) * avgWin) - (((100 - winRate) / 100) * avgLoss)
+      : 0;
+
     let totalDuration = 0;
-    this.state.tradeHistory.forEach(t => {
+    trades.forEach(t => {
       totalDuration += new Date(t.sellTime).getTime() - new Date(t.buyTime).getTime();
     });
     const avgDurationHours = totalTrades > 0 ? (totalDuration / totalTrades / 3600000) : 0;
 
-    const avgWin = winners.length > 0 ? grossProfit / winners.length : 0;
-    const avgLoss = losers.length > 0 ? grossLoss / losers.length : 0;
-
-    const expectancy = totalTrades > 0 
-      ? ((winRate / 100) * avgWin) - (((100 - winRate) / 100) * avgLoss)
-      : 0;
-
     const byReason = {};
-    this.state.tradeHistory.forEach(t => {
-      byReason[t.reason] = (byReason[t.reason] || 0) + 1;
-    });
+    trades.forEach(t => { byReason[t.reason] = (byReason[t.reason] || 0) + 1; });
 
     const bySymbol = {};
-    this.state.tradeHistory.forEach(t => {
+    trades.forEach(t => {
       if (!bySymbol[t.symbol]) bySymbol[t.symbol] = { trades: 0, profit: 0, wins: 0 };
       bySymbol[t.symbol].trades++;
       bySymbol[t.symbol].profit += t.profit;
@@ -314,27 +323,78 @@ class BacktestEngine {
     });
 
     return {
+      totalTrades,
+      winningTrades: winners.length,
+      losingTrades: losers.length,
+      winRate: parseFloat(winRate.toFixed(2)),
+      totalProfit,
+      roi: parseFloat(roi.toFixed(2)),
+      profitFactor: parseFloat(profitFactor.toFixed(2)),
+      maxDrawdown: parseFloat(maxDD.toFixed(2)),
+      avgWin: parseFloat(avgWin.toFixed(2)),
+      avgLoss: parseFloat(avgLoss.toFixed(2)),
+      expectancy: parseFloat(expectancy.toFixed(2)),
+      avgDurationHours: parseFloat(avgDurationHours.toFixed(1)),
+      byReason,
+      bySymbol
+    };
+  }
+
+  generateReport() {
+    const strategyNames = { 1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)' };
+
+    // Full curve & drawdown
+    let maxEquity = this.initialBalance;
+    const drawdownCurve = [];
+    this.state.equityCurve.forEach(p => {
+      if (p.equity > maxEquity) maxEquity = p.equity;
+      const dd = (maxEquity - p.equity) / maxEquity * 100;
+      drawdownCurve.push({ time: p.time, drawdown: parseFloat(dd.toFixed(2)) });
+    });
+
+    // Full metrics
+    const fullMetrics = this.computeMetrics(
+      this.state.tradeHistory,
+      this.initialBalance,
+      this.state.balance,
+      this.state.equityCurve
+    );
+
+    // Train/holdout split
+    let trainMetrics = null, holdoutMetrics = null;
+    if (this.splitTime) {
+      const splitIso = new Date(this.splitTime).toISOString();
+      const trainTrades = this.state.tradeHistory.filter(t => t.phase === 'train');
+      const holdoutTrades = this.state.tradeHistory.filter(t => t.phase === 'holdout');
+      const trainCurve = this.state.equityCurve.filter(p => p.time < this.splitTime);
+      const holdoutCurve = this.state.equityCurve.filter(p => p.time >= this.splitTime);
+
+      const balanceAtSplit = trainCurve.length > 0
+        ? trainCurve[trainCurve.length - 1].equity
+        : this.initialBalance;
+
+      trainMetrics = this.computeMetrics(
+        trainTrades, this.initialBalance, balanceAtSplit, trainCurve
+      );
+      holdoutMetrics = this.computeMetrics(
+        holdoutTrades, balanceAtSplit, this.state.balance, holdoutCurve
+      );
+      trainMetrics.splitTime = splitIso;
+      holdoutMetrics.splitTime = splitIso;
+    }
+
+    return {
       summary: {
         initialBalance: this.initialBalance,
         finalBalance: parseFloat(this.state.balance.toFixed(2)),
-        totalProfit,
-        roi: parseFloat(roi.toFixed(2)),
-        winRate: parseFloat(winRate.toFixed(2)),
-        totalTrades,
-        winningTrades: winners.length,
-        losingTrades: losers.length,
-        maxDrawdown: parseFloat(maxDD.toFixed(2)),
-        profitFactor: parseFloat(profitFactor.toFixed(2)),
-        avgWin: parseFloat(avgWin.toFixed(2)),
-        avgLoss: parseFloat(avgLoss.toFixed(2)),
-        expectancy: parseFloat(expectancy.toFixed(2)),
-        avgDurationHours: parseFloat(avgDurationHours.toFixed(1)),
         periodMonths: this.months,
         symbols: this.symbols,
         strategy: strategyNames[this.strategyVersion] || 'V3 (ADX+Trailing)',
-        byReason,
-        bySymbol
+        oosSplitRatio: this.oosSplitRatio,
+        ...fullMetrics
       },
+      trainSummary: trainMetrics,
+      holdoutSummary: holdoutMetrics,
       trades: this.state.tradeHistory,
       equityCurve: this.state.equityCurve,
       drawdownCurve

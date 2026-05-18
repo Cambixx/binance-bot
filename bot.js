@@ -7,14 +7,19 @@ const INTERVAL = '15m';
 const TOP_COINS_LIMIT = 10;
 const BLACKLIST = [
   'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
-  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ'
+  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE'
 ];
 
-// Configuración de Riesgo V3
+// Defense-in-depth: gate explícito invocable en cualquier punto
+function isBlacklisted(symbol) {
+  return BLACKLIST.some(badCoin => symbol.includes(badCoin));
+}
+
+// Configuración de Riesgo V3 (post-audit 2026-05-18)
 const RISK_TP = 5.0;            // Take Profit
-const RISK_SL = 2.5;            // Stop Loss (Aumentado a 2.5% para dar aire al trade)
-const TRAIL_ACTIVATION = 1.5;   // Activa trailing al +1.5% (V3 optimizado)
-const TRAIL_DISTANCE = 0.45;    // Protege el 45% del pico, deja 55% de respiración
+const RISK_SL = 3.0;            // Stop Loss ampliado a 3.0% para absorber slippage real (~0.5pp medido)
+const TRAIL_ACTIVATION = 1.5;   // Activa trailing al +1.5%
+const TRAIL_DISTANCE = 0.30;    // Protege solo 30% del pico — deja más aire al upside
 
 export async function runBot() {
   console.log('🤖 Iniciando Binance Shadow Bot V3 (ADX + Trailing)...');
@@ -25,9 +30,7 @@ export async function runBot() {
     
     // 1. Obtener símbolos con más volumen
     let symbols = await binance.getTopVolumeSymbols(TOP_COINS_LIMIT + 5);
-    symbols = symbols.filter(symbol => {
-      return !BLACKLIST.some(badCoin => symbol.includes(badCoin));
-    }).slice(0, TOP_COINS_LIMIT);
+    symbols = symbols.filter(symbol => !isBlacklisted(symbol)).slice(0, TOP_COINS_LIMIT);
 
     // Posiciones abiertas actuales
     const openSymbols = await shadowTrader.getOpenPositions();
@@ -57,10 +60,12 @@ export async function runBot() {
       // 3. Evaluar Señal de Entrada/Salida
       const signal = evaluateStrategy(strategyData);
 
-      if (signal === 'BUY' && !hasPos && canOpenNewPosition) {
+      if (signal === 'BUY' && !hasPos && canOpenNewPosition && !isBlacklisted(symbol)) {
         console.log(`\n🚨 [V3 SIGNAL] COMPRA DETECTADA: ${symbol} a ${currentPrice}`);
         await shadowTrader.buy(symbol, currentPrice, { trailActivationPct: TRAIL_ACTIVATION });
-      } 
+      } else if (signal === 'BUY' && !hasPos && isBlacklisted(symbol)) {
+        console.warn(`⛔ [BLACKLIST GATE] Señal BUY bloqueada para ${symbol} (en blacklist)`);
+      }
       else if (signal === 'SELL' && hasPos) {
         console.log(`\n🚨 [V3 SIGNAL] VENTA (RSI SOBRECOMPRA): ${symbol} a ${currentPrice}`);
         await shadowTrader.sell(symbol, currentPrice, 'SIGNAL');

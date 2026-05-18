@@ -14,7 +14,7 @@ El bot utiliza actualmente la **Estrategia V3**, optimizada mediante backtesting
 
 ### 2.1 Lógica de Entrada (V3 - ADX + Momentum + Volumen)
 *   **Temporalidad:** 15 minutos (`15m`).
-*   **Filtro de Tendencia (ADX):** Solo opera si el **ADX > 20**. Esto asegura que el bot no entre en mercados laterales o ruidosos.
+*   **Filtro de Tendencia (ADX):** Solo opera si el **ADX > 25**. Esto asegura que el bot no entre en mercados laterales o ruidosos. *(Subido de 20 → 25 el 18/05/2026 tras auditoría V3.)*
 *   **Cruce de Medias (EMA 12/26):** Cruce alcista confirmado durante 2 velas consecutivas para evitar "falsos cruces".
 *   **Filtro de Precio (EMA 50):** El precio debe estar por encima de la EMA 50 para confirmar una tendencia alcista saludable.
 *   **RSI (Relative Strength Index):** El RSI debe estar en zona de momentum saludable (**40 - 65**).
@@ -22,9 +22,9 @@ El bot utiliza actualmente la **Estrategia V3**, optimizada mediante backtesting
 
 ### 2.2 Gestión de Riesgo Dinámica (Trailing Stop)
 A diferencia de las versiones anteriores con objetivos fijos, la V3 utiliza una gestión inteligente:
-*   **Stop Loss (SL):** -2.5% (Ajustado para absorber el ruido del mercado).
+*   **Stop Loss (SL):** -3.0% *(Ampliado de 2.5% → 3.0% el 18/05/2026 tras detectar ~0.5pp de slippage adverso en ejecución real del SL).*
 *   **Trailing Stop Activation:** Se activa automáticamente al alcanzar un **+1.5%** de beneficio. *(Optimizado el 13/05/2026 — antes 1.0%, causaba activaciones prematuras en micro-ganancias).*
-*   **Trailing Distance:** Una vez activado, el bot protege el **45% del beneficio máximo** alcanzado. Si el precio retrocede por debajo de ese nivel dinámico, la posición se cierra. *(Optimizado el 13/05/2026 — antes 60%, demasiado agresivo; ahora deja 55% de respiración al trade para alcanzar TPs).*
+*   **Trailing Distance:** Una vez activado, el bot protege el **30% del beneficio máximo** alcanzado. *(Reducido de 45% → 30% el 18/05/2026 — el trail al 45% sacaba ganadores con margen muy pequeño; bajarlo deja más aire al upside).*
 *   **Take Profit (TP):** +5.0% (Como salida de emergencia por beneficio rápido).
 *   **RSI Exit:** Si el RSI supera **80** (sobrecompra extrema), el bot cierra la posición preventivamente.
 
@@ -32,6 +32,7 @@ A diferencia de las versiones anteriores con objetivos fijos, la V3 utiliza una 
 Los siguientes activos están excluidos del escaneo:
 *   **Stablecoins/Fiat:** LUNC, USD1, FDUSD, TUSD, DAI, EUR, GBP, BUSD, USDP, USTC, TST.
 *   **Bajo rendimiento V3 (añadidos 13/05/2026):** TAO, ZEC, PEPE, ADA, INJ. Estos activos mostraron un 75-100% de tasa de pérdidas en shadow trading, con TAO acumulando -$34.95 en 4 trades (50% de las pérdidas totales).
+*   **Añadido 18/05/2026 tras auditoría:** **DOGE**. En backtest de 12 meses acumuló -61.1% sobre la moneda en 114 trades (muestra alta), perdiendo $208 USDC de los $475 brutos del sistema.
 
 ### 2.4 Resultados de Backtest V3 Optimizado (24 meses, 5 monedas)
 *   **ROI:** +23.31% | **Balance Final:** 6,165.64 USDC

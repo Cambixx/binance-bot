@@ -6,7 +6,7 @@ import { exec } from 'child_process';
 // Blacklist centralizada (igual que bot.js)
 const BLACKLIST = [
   'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
-  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ'
+  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE'
 ];
 
 async function main() {
@@ -18,18 +18,23 @@ async function main() {
 
   const months = monthsArg ? parseInt(monthsArg.split('=')[1]) : 3;
   const initialBalance = balanceArg ? parseFloat(balanceArg.split('=')[1]) : 5000;
-  
+  const oosArg = args.find(a => a.startsWith('--oos-split='));
+  const oosSplitRatio = oosArg ? parseFloat(oosArg.split('=')[1]) : 0.7;
+  const universeArg = args.find(a => a.startsWith('--universe='));
+  // Universo por defecto = 10, coincide con TOP_COINS_LIMIT en bot.js (paridad live)
+  const universeSize = universeArg ? parseInt(universeArg.split('=')[1]) : 10;
+
   let symbols = ['BTCUSDC', 'ETHUSDC', 'SOLUSDC', 'BNBUSDC', 'XRPUSDC'];
-  
+
   if (symbolsArg) {
     symbols = symbolsArg.split('=')[1].split(',');
   } else {
     try {
-      console.log('🔍 Obteniendo top monedas por volumen para el backtest...');
-      const topSymbols = await binance.getTopVolumeSymbols(10);
+      console.log(`🔍 Obteniendo top ${universeSize} monedas por volumen (paridad con bot.js)...`);
+      // Pedimos universeSize + 5 para tener colchón tras filtrar blacklist (igual que bot.js)
+      const topSymbols = await binance.getTopVolumeSymbols(universeSize + 5);
       if (topSymbols && topSymbols.length > 0) {
-        // Filtrar blacklist ANTES de seleccionar
-        symbols = topSymbols.filter(s => !BLACKLIST.some(bad => s.includes(bad))).slice(0, 5);
+        symbols = topSymbols.filter(s => !BLACKLIST.some(bad => s.includes(bad))).slice(0, universeSize);
       }
     } catch (e) {
       console.log('⚠️ No se pudo obtener el top de Binance, usando defaults.');
@@ -51,7 +56,8 @@ async function main() {
     symbols,
     months,
     interval: '15m',
-    strategyVersion
+    strategyVersion,
+    oosSplitRatio
   });
 
   try {
@@ -99,10 +105,46 @@ async function main() {
       console.log(`    ${sym}: ${data.trades} trades | ${pColor}${data.profit >= 0 ? '+' : ''}${data.profit.toFixed(2)} USDC${reset} | WR: ${wr}%`);
     }
     console.log('════════════════════════════════════════════════════════');
+
+    // --- Reporte comparativo Train vs Holdout (validación out-of-sample) ---
+    if (results.trainSummary && results.holdoutSummary) {
+      const tr = results.trainSummary;
+      const ho = results.holdoutSummary;
+      const splitDate = (tr.splitTime || '').slice(0, 10);
+      const arrow = (a, b, lowerIsBetter = false) => {
+        if (b === 0 && a === 0) return '—';
+        const better = lowerIsBetter ? b <= a : b >= a;
+        const c = better ? '\x1b[32m' : '\x1b[31m';
+        const sign = b >= a ? '+' : '';
+        return `${c}${sign}${(b - a).toFixed(2)}${reset}`;
+      };
+      console.log('\n══════════ 🧪 VALIDACIÓN OUT-OF-SAMPLE ══════════════════');
+      console.log(`Split: ${(engine.oosSplitRatio*100).toFixed(0)}% train / ${((1-engine.oosSplitRatio)*100).toFixed(0)}% holdout (corte: ${splitDate})\n`);
+      const row = (label, a, b, lowerIsBetter = false) => console.log(`  ${label.padEnd(18)} train=${String(a).padEnd(10)} holdout=${String(b).padEnd(10)} Δ=${arrow(a, b, lowerIsBetter)}`);
+      row('Trades', tr.totalTrades, ho.totalTrades);
+      row('Win Rate %', tr.winRate, ho.winRate);
+      row('Profit Factor', tr.profitFactor, ho.profitFactor);
+      row('ROI %', tr.roi, ho.roi);
+      row('Max Drawdown %', tr.maxDrawdown, ho.maxDrawdown, true);
+      row('Expectancy', tr.expectancy, ho.expectancy);
+
+      // Veredicto OOS automático
+      console.log('\n  Veredicto OOS:');
+      const verdicts = [];
+      const degraded = (a, b, threshPct) => a !== 0 && ((a - b) / Math.abs(a)) * 100 > threshPct;
+      if (tr.profitFactor < 1 || ho.profitFactor < 1) verdicts.push('🔴 PF<1 en alguna fase → no rentable');
+      if (degraded(tr.profitFactor, ho.profitFactor, 25)) verdicts.push('🟡 PF cae >25% en holdout → posible overfit');
+      if (degraded(tr.winRate, ho.winRate, 15)) verdicts.push('🟡 WR cae >15pp relativo en holdout');
+      if (ho.maxDrawdown > tr.maxDrawdown * 1.5 && ho.maxDrawdown > 5) verdicts.push('🟡 MaxDD holdout 50%+ peor que train');
+      if (verdicts.length === 0) verdicts.push('✅ Estrategia robusta: métricas consistentes train ↔ holdout');
+      verdicts.forEach(v => console.log('    ' + v));
+      console.log('════════════════════════════════════════════════════════');
+    }
+
     console.log(`📄 Resultados guardados en: ${outputFilename}`);
-    
+
     console.log('\n🖥️  Abre backtest-report-output.html en tu navegador para ver los detalles.');
-    
+
     if (process.platform === 'darwin') {
       exec(`open backtest-report-output.html`);
     }

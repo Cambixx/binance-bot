@@ -155,7 +155,7 @@ export function evaluateStrategyV2(closes) {
  * - El bot entra bien pero sale antes de que el trade pueda desarrollarse
  * 
  * CAMBIOS V3:
- * - ENTRADA: Cruce EMA 12/26 + ADX > 20 (confirma que hay tendencia real, no ruido)
+ * - ENTRADA: Cruce EMA 12/26 + ADX > 25 (confirma que hay tendencia real fuerte, no ruido)
  *            + RSI 40-65 + Precio > EMA 50 (tendencia más reactiva que EMA 100)
  * - SALIDA: ELIMINAMOS el Death Cross como señal de venta (demasiado ruidoso)
  *           Solo salimos por RSI > 78 (sobrecompra extrema) 
@@ -218,8 +218,8 @@ export function evaluateStrategyV3(candles) {
   // Cruce confirmado (2 velas)
   const isGoldenCross = fastPrev2 <= slowPrev2 && fastPrev > slowPrev && fastNow > slowNow;
 
-  // Filtros de entrada
-  const hasTrend = adxNow > 20;           // Hay una tendencia real (no choppy market)
+  // Filtros de entrada (post-audit 2026-05-18: ADX subido 20→25 para filtro más estricto)
+  const hasTrend = adxNow > 25;           // Hay una tendencia real fuerte (no choppy market)
   const isUptrend = price > trendNow;      // Precio sobre EMA 50
   const rsiHealthy = rsiNow > 40 && rsiNow < 65;
   const mfiHealthy = mfiNow > 40;          // Confirmación de volumen de compra
