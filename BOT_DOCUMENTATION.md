@@ -13,7 +13,7 @@ El bot está construido en Node.js y diseñado para ejecutarse como una **funci�
 El bot utiliza actualmente la **Estrategia V4C-COMBO** (V3 + filtros de régimen de mercado), validada mediante backtesting con división out-of-sample y comparación contra V1, V2, V3 y dos variantes alternativas (V4-A Supertrend, V4-B ATR-exits).
 
 ### 2.1 Lógica de Entrada (V4C-COMBO)
-La entrada combina **5 confirmaciones técnicas heredadas de V3** + **2 filtros de régimen** nuevos:
+La entrada combina **5 confirmaciones técnicas heredadas de V3** + **2 filtros de régimen** nuevos: 
 
 #### Confirmaciones heredadas de V3
 *   **Temporalidad:** 15 minutos (`15m`).
