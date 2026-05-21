@@ -3,10 +3,10 @@ import BacktestEngine from './backtestEngine.js';
 import binance from './binanceService.js';
 import { exec } from 'child_process';
 
-// Blacklist centralizada (igual que bot.js)
+// Blacklist centralizada (igual que bot.js — BCH añadido tras backtest V4C-COMBO)
 const BLACKLIST = [
   'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
-  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE'
+  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE', 'BCH'
 ];
 
 async function main() {
@@ -14,7 +14,30 @@ async function main() {
   const monthsArg = args.find(a => a.startsWith('--months='));
   const symbolsArg = args.find(a => a.startsWith('--symbols='));
   const balanceArg = args.find(a => a.startsWith('--balance='));
-  const strategyVersion = args.includes('--v1') ? 1 : args.includes('--v2') ? 2 : 3;
+  // Default = V4C-COMBO (paridad con bot.js productivo)
+  let strategyVersion = '4C';
+  if (args.includes('--v1')) strategyVersion = 1;
+  else if (args.includes('--v2')) strategyVersion = 2;
+  else if (args.includes('--v3')) strategyVersion = 3;
+  else if (args.includes('--v4a')) strategyVersion = '4A';
+  else if (args.includes('--v4b')) strategyVersion = '4B';
+  else if (args.includes('--v4c')) strategyVersion = '4C';
+
+  // Exit mode auto: V4-A y V4-B usan ATR por defecto, el resto usa fixed
+  const exitModeArg = args.find(a => a.startsWith('--exit-mode='));
+  const exitMode = exitModeArg
+    ? exitModeArg.split('=')[1]
+    : (strategyVersion === '4A' || strategyVersion === '4B' ? 'atr' : 'fixed');
+
+  const atrSLArg = args.find(a => a.startsWith('--atr-sl='));
+  const atrTrailArg = args.find(a => a.startsWith('--atr-trail='));
+  const partialArg = args.find(a => a.startsWith('--partial-r='));
+  const chopArg = args.find(a => a.startsWith('--chop-max='));
+  const bbwArg = args.find(a => a.startsWith('--bbw-pct='));
+  const trailDistArg = args.find(a => a.startsWith('--trail-dist='));
+  const trailActArg = args.find(a => a.startsWith('--trail-act='));
+  const slArg = args.find(a => a.startsWith('--sl='));
+  const tpArg = args.find(a => a.startsWith('--tp='));
 
   const months = monthsArg ? parseInt(monthsArg.split('=')[1]) : 3;
   const initialBalance = balanceArg ? parseFloat(balanceArg.split('=')[1]) : 5000;
@@ -47,23 +70,45 @@ async function main() {
   console.log(`📅 Periodo: ${months} meses`);
   console.log(`💰 Balance Inicial: ${initialBalance} USDC`);
   console.log(`🪙 Símbolos: ${symbols.join(', ')}`);
-  const stratNames = { 1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)' };
+  const stratNames = {
+    1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)',
+    '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)'
+  };
   console.log(`📋 Estrategia: ${stratNames[strategyVersion]}`);
+  console.log(`🚪 Exit mode: ${exitMode}`);
   console.log('--------------------------------------------------------');
 
-  const engine = new BacktestEngine({
+  // Defaults V4C-COMBO (paridad bot.js): chop<50, BBW pct>20
+  const regimeOpts = { chopMax: 50, bbwPctMin: 20 };
+  if (chopArg) regimeOpts.chopMax = parseFloat(chopArg.split('=')[1]);
+  if (bbwArg) regimeOpts.bbwPctMin = parseFloat(bbwArg.split('=')[1]);
+
+  const engineOpts = {
     initialBalance,
     symbols,
     months,
     interval: '15m',
     strategyVersion,
-    oosSplitRatio
-  });
+    oosSplitRatio,
+    exitMode,
+    atrSLMult: atrSLArg ? parseFloat(atrSLArg.split('=')[1]) : 2.0,
+    atrTrailMult: atrTrailArg ? parseFloat(atrTrailArg.split('=')[1]) : 3.0,
+    partialExitAtR: partialArg ? parseFloat(partialArg.split('=')[1]) : 0,
+    regimeOpts
+  };
+  if (trailDistArg) engineOpts.trailingDistance = parseFloat(trailDistArg.split('=')[1]);
+  if (trailActArg) engineOpts.trailingActivation = parseFloat(trailActArg.split('=')[1]);
+  if (slArg) engineOpts.stopLossPct = parseFloat(slArg.split('=')[1]);
+  if (tpArg) engineOpts.takeProfitPct = parseFloat(tpArg.split('=')[1]);
+
+  const engine = new BacktestEngine(engineOpts);
 
   try {
     const results = await engine.run();
 
-    const outputFilename = 'backtest-results.json';
+    const outputArg = args.find(a => a.startsWith('--output='));
+    const noOpen = args.includes('--no-open');
+    const outputFilename = outputArg ? outputArg.split('=')[1] : 'backtest-results.json';
     fs.writeFileSync(outputFilename, JSON.stringify(results, null, 2));
     
     // Inyectar datos directamente en el HTML para evitar problemas de CORS con file://
@@ -145,7 +190,7 @@ async function main() {
 
     console.log('\n🖥️  Abre backtest-report-output.html en tu navegador para ver los detalles.');
 
-    if (process.platform === 'darwin') {
+    if (process.platform === 'darwin' && !noOpen) {
       exec(`open backtest-report-output.html`);
     }
 

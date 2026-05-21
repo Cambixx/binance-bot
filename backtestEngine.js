@@ -1,12 +1,16 @@
 import axios from 'axios';
-import { evaluateStrategy, evaluateStrategyV2, evaluateStrategyV3 } from './indicators.js';
+import {
+  evaluateStrategy, evaluateStrategyV2, evaluateStrategyV3,
+  evaluateStrategyV4A, evaluateStrategyV4B, evaluateStrategyV4C,
+  calculateATR
+} from './indicators.js';
 
 const BINANCE_API_BASE = 'https://data-api.binance.vision/api/v3';
 
 // Misma Blacklist que bot.js para coherencia total
 const BLACKLIST = [
   'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
-  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE'
+  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE', 'BCH'
 ];
 
 class BacktestEngine {
@@ -15,14 +19,24 @@ class BacktestEngine {
     this.symbols = options.symbols || ['BTCUSDC', 'ETHUSDC', 'SOLUSDC'];
     this.interval = options.interval || '15m';
     this.months = options.months || 3;
-    this.strategyVersion = options.strategyVersion || 3; // 1, 2, or 3
+    this.strategyVersion = options.strategyVersion || '4C'; // default paridad bot.js (V4C-COMBO)
 
-    // Risk management (post-audit 2026-05-18)
+    // Risk management (V4C-COMBO post-backtest 2026-05-21)
     this.takeProfitPct = options.takeProfitPct || 5.0;
     this.stopLossPct = options.stopLossPct || 3.0;
     this.trailingActivation = options.trailingActivation || 1.5;
-    this.trailingDistance = options.trailingDistance || 0.30;     // Protege 30% del pico (deja más aire al upside)
+    this.trailingDistance = options.trailingDistance || 0.45;     // V4C-COMBO: protege 45% del pico
     this.cooldownCandles = options.cooldownCandles || 12; // 12 velas (3h) de cooldown tras un SL
+
+    // Exit mode: 'fixed' = TP/SL/trailing% clásicos | 'atr' = Chandelier (ATR-based) + ATR SL
+    this.exitMode = options.exitMode || 'fixed';
+    this.atrPeriod = options.atrPeriod || 14;
+    this.atrSLMult = options.atrSLMult || 2.0;        // SL = entry - 2×ATR
+    this.atrTrailMult = options.atrTrailMult || 3.0;  // Chandelier trail = peak - 3×ATR
+    this.partialExitAtR = options.partialExitAtR || 0; // 0 = off, >0 = vende 50% al alcanzar X·R
+
+    // Regime-gate params (V4-C)
+    this.regimeOpts = options.regimeOpts || {};
 
     // Validación out-of-sample: split temporal train/holdout
     this.oosSplitRatio = options.oosSplitRatio ?? 0.7; // 70% train, 30% holdout
@@ -87,12 +101,19 @@ class BacktestEngine {
   }
 
   async run() {
-    const strategyNames = { 1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)' };
+    const strategyNames = {
+      1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)',
+      '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)'
+    };
     const strategyName = strategyNames[this.strategyVersion] || 'V3 (ADX+Trailing)';
 
     console.log('🚀 Iniciando simulación...');
     console.log(`📋 Estrategia: ${strategyName}`);
-    console.log(`🎯 TP: +${this.takeProfitPct}% | SL: -${this.stopLossPct}% | Trail: +${this.trailingActivation}%→${(this.trailingDistance * 100).toFixed(0)}%peak`);
+    if (this.exitMode === 'atr') {
+      console.log(`🎯 EXIT=ATR | SL=${this.atrSLMult}×ATR | Chandelier=${this.atrTrailMult}×ATR | partial@${this.partialExitAtR}R`);
+    } else {
+      console.log(`🎯 TP: +${this.takeProfitPct}% | SL: -${this.stopLossPct}% | Trail: +${this.trailingActivation}%→${(this.trailingDistance * 100).toFixed(0)}%peak`);
+    }
     
     this.symbols = this.filterSymbols(this.symbols);
     console.log(`🪙 Símbolos válidos: ${this.symbols.join(', ')}`);
@@ -157,53 +178,45 @@ class BacktestEngine {
 
       // Evaluar Estrategia según versión
       let signal;
-      if (this.strategyVersion === 3) {
-        signal = evaluateStrategyV3(buf);
-      } else if (this.strategyVersion === 2) {
-        signal = evaluateStrategyV2(buf.closes);
-      } else {
-        signal = evaluateStrategy(buf.closes);
+      switch (String(this.strategyVersion)) {
+        case '1':  signal = evaluateStrategy(buf.closes); break;
+        case '2':  signal = evaluateStrategyV2(buf.closes); break;
+        case '3':  signal = evaluateStrategyV3(buf); break;
+        case '4A': signal = evaluateStrategyV4A(buf); break;
+        case '4B': signal = evaluateStrategyV4B(buf); break;
+        case '4C': signal = evaluateStrategyV4C(buf, this.regimeOpts); break;
+        default:   signal = evaluateStrategyV3(buf);
       }
-      
+
       const hasPosition = !!this.state.openPositions[symbol];
       const isOnCooldown = this.state.cooldowns[symbol] && this.state.cooldowns[symbol] > 0;
 
       // Lógica de Compra
       if (signal === 'BUY' && !hasPosition && !isOnCooldown) {
-        this.executeBuy(symbol, close, time);
-      } 
+        // Si modo ATR, anclar SL/peak iniciales con ATR del momento
+        const entryATR = this.exitMode === 'atr'
+          ? this.getCurrentATR(buf)
+          : null;
+        this.executeBuy(symbol, close, time, entryATR);
+      }
       // Lógica de Venta por señal
       else if (signal === 'SELL' && hasPosition) {
         this.executeSell(symbol, close, time, 'SIGNAL');
       }
 
-      // Lógica de TP / SL / Trailing Stop dinámico
+      // Lógica de salida (ATR vs fixed)
       if (hasPosition && this.state.openPositions[symbol]) {
         const pos = this.state.openPositions[symbol];
-        const profitPct = ((close - pos.buyPrice) / pos.buyPrice) * 100;
 
-        // Actualizar precio máximo alcanzado
+        // Actualizar precio máximo alcanzado (común a ambos modos)
         if (close > (pos.peakPrice || pos.buyPrice)) {
           pos.peakPrice = close;
         }
 
-        // Trailing Stop dinámico: una vez activado, el SL sube con el precio
-        if (profitPct >= this.trailingActivation) {
-          pos.trailingActivated = true;
-          // SL = precio_pico × (1 - (1 - trailingDistance) × distancia_original)
-          // Simplificado: trail al X% del beneficio máximo alcanzado
-          const peakProfit = ((pos.peakPrice - pos.buyPrice) / pos.buyPrice) * 100;
-          const trailLevel = peakProfit * this.trailingDistance;
-          pos.trailingSL = pos.buyPrice * (1 + trailLevel / 100);
-        }
-
-        if (profitPct >= this.takeProfitPct) {
-          this.executeSell(symbol, close, time, 'TAKE_PROFIT');
-        } else if (pos.trailingActivated && close <= pos.trailingSL) {
-          this.executeSell(symbol, close, time, 'TRAILING_STOP');
-        } else if (profitPct <= -this.stopLossPct) {
-          this.executeSell(symbol, close, time, 'STOP_LOSS');
-          this.state.cooldowns[symbol] = this.cooldownCandles;
+        if (this.exitMode === 'atr') {
+          this.applyATRExits(symbol, close, time, pos);
+        } else {
+          this.applyFixedExits(symbol, close, time, pos);
         }
       }
 
@@ -220,7 +233,7 @@ class BacktestEngine {
     return this.generateReport();
   }
 
-  executeBuy(symbol, price, time) {
+  executeBuy(symbol, price, time, entryATR = null) {
     const investAmount = this.state.balance * 0.20;
     // Eliminado el bloqueo de saldo < 10 para ver todas las operaciones
 
@@ -234,8 +247,82 @@ class BacktestEngine {
       time: new Date(time).toISOString(),
       trailingActivated: false,
       trailingSL: 0,
-      peakPrice: price
+      peakPrice: price,
+      // ATR-mode bookkeeping
+      entryATR: entryATR,
+      atrSL: entryATR ? price - this.atrSLMult * entryATR : null,
+      partialTaken: false
     };
+  }
+
+  getCurrentATR(buf) {
+    const atrArr = calculateATR(buf.highs, buf.lows, buf.closes, this.atrPeriod);
+    return atrArr.length > 0 ? atrArr[atrArr.length - 1] : null;
+  }
+
+  applyFixedExits(symbol, close, time, pos) {
+    const profitPct = ((close - pos.buyPrice) / pos.buyPrice) * 100;
+
+    if (profitPct >= this.trailingActivation) {
+      pos.trailingActivated = true;
+      const peakProfit = ((pos.peakPrice - pos.buyPrice) / pos.buyPrice) * 100;
+      const trailLevel = peakProfit * this.trailingDistance;
+      pos.trailingSL = pos.buyPrice * (1 + trailLevel / 100);
+    }
+
+    if (profitPct >= this.takeProfitPct) {
+      this.executeSell(symbol, close, time, 'TAKE_PROFIT');
+    } else if (pos.trailingActivated && close <= pos.trailingSL) {
+      this.executeSell(symbol, close, time, 'TRAILING_STOP');
+    } else if (profitPct <= -this.stopLossPct) {
+      this.executeSell(symbol, close, time, 'STOP_LOSS');
+      this.state.cooldowns[symbol] = this.cooldownCandles;
+    }
+  }
+
+  applyATRExits(symbol, close, time, pos) {
+    if (!pos.entryATR) {
+      // fallback a fixed si no hay ATR válido
+      this.applyFixedExits(symbol, close, time, pos);
+      return;
+    }
+    const R = this.atrSLMult * pos.entryATR; // unidad de riesgo (precio)
+
+    // Partial profit-taking opcional a Nx ese R inicial
+    if (this.partialExitAtR > 0 && !pos.partialTaken) {
+      const targetPrice = pos.buyPrice + this.partialExitAtR * R;
+      if (close >= targetPrice) {
+        const halfAmount = pos.amount * 0.5;
+        const returnAmount = halfAmount * close;
+        const halfInvested = pos.invested * 0.5;
+        const partialProfit = returnAmount - halfInvested;
+        const partialPct = (partialProfit / halfInvested) * 100;
+        this.state.balance += returnAmount;
+        this.state.tradeHistory.push({
+          symbol, buyPrice: pos.buyPrice, sellPrice: close,
+          profit: parseFloat(partialProfit.toFixed(2)),
+          profitPct: parseFloat(partialPct.toFixed(2)),
+          buyTime: pos.time, sellTime: new Date(time).toISOString(),
+          reason: 'PARTIAL_TP',
+          phase: (this.splitTime && new Date(pos.time).getTime() >= this.splitTime) ? 'holdout' : 'train'
+        });
+        pos.amount -= halfAmount;
+        pos.invested -= halfInvested;
+        pos.partialTaken = true;
+        // tras parcial: mover SL a breakeven
+        pos.atrSL = pos.buyPrice;
+      }
+    }
+
+    // Chandelier trail: SL dinámico = peak - atrTrailMult × ATR(entry)
+    const chandelierSL = pos.peakPrice - this.atrTrailMult * pos.entryATR;
+    if (chandelierSL > pos.atrSL) pos.atrSL = chandelierSL;
+
+    if (close <= pos.atrSL) {
+      const reason = pos.peakPrice > pos.buyPrice * 1.01 ? 'TRAILING_STOP' : 'STOP_LOSS';
+      this.executeSell(symbol, close, time, reason);
+      if (reason === 'STOP_LOSS') this.state.cooldowns[symbol] = this.cooldownCandles;
+    }
   }
 
   executeSell(symbol, price, time, reason) {

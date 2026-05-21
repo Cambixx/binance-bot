@@ -1,4 +1,4 @@
-import { EMA, RSI, ADX, MFI, MACD } from 'technicalindicators';
+import { EMA, RSI, ADX, MFI, MACD, ATR, BollingerBands } from 'technicalindicators';
 
 /**
  * Calcula la Media Móvil Exponencial (EMA) para una serie de precios de cierre
@@ -233,5 +233,285 @@ export function evaluateStrategyV3(candles) {
     return 'SELL';
   }
 
+  return 'HOLD';
+}
+
+// ============================================================
+//  HELPERS V4 — ATR, Supertrend, Choppiness Index, BBW
+// ============================================================
+
+export function calculateATR(highs, lows, closes, period = 14) {
+  if (highs.length < period + 1) return [];
+  return ATR.calculate({ period, high: highs, low: lows, close: closes });
+}
+
+/**
+ * Supertrend (period=10, mult=3 por defecto)
+ * Devuelve un array { value, trend } donde trend = 1 (up) o -1 (down)
+ */
+export function calculateSupertrend(highs, lows, closes, period = 10, multiplier = 3) {
+  const atr = calculateATR(highs, lows, closes, period);
+  if (atr.length === 0) return [];
+
+  const offset = closes.length - atr.length;
+  const result = [];
+  let prevFinalUpper = 0;
+  let prevFinalLower = 0;
+  let prevSupertrend = 0;
+  let prevTrend = 1;
+
+  for (let i = 0; i < atr.length; i++) {
+    const idx = i + offset;
+    const high = highs[idx];
+    const low = lows[idx];
+    const close = closes[idx];
+    const prevClose = idx > 0 ? closes[idx - 1] : close;
+    const hl2 = (high + low) / 2;
+    const upperBasic = hl2 + multiplier * atr[i];
+    const lowerBasic = hl2 - multiplier * atr[i];
+
+    const finalUpper = (upperBasic < prevFinalUpper || prevClose > prevFinalUpper)
+      ? upperBasic : prevFinalUpper;
+    const finalLower = (lowerBasic > prevFinalLower || prevClose < prevFinalLower)
+      ? lowerBasic : prevFinalLower;
+
+    let trend;
+    if (i === 0) {
+      trend = close > upperBasic ? 1 : -1;
+    } else if (prevSupertrend === prevFinalUpper && close <= finalUpper) {
+      trend = -1;
+    } else if (prevSupertrend === prevFinalUpper && close > finalUpper) {
+      trend = 1;
+    } else if (prevSupertrend === prevFinalLower && close >= finalLower) {
+      trend = 1;
+    } else if (prevSupertrend === prevFinalLower && close < finalLower) {
+      trend = -1;
+    } else {
+      trend = prevTrend;
+    }
+
+    const supertrend = trend === 1 ? finalLower : finalUpper;
+
+    result.push({ value: supertrend, trend });
+    prevFinalUpper = finalUpper;
+    prevFinalLower = finalLower;
+    prevSupertrend = supertrend;
+    prevTrend = trend;
+  }
+
+  return result;
+}
+
+/**
+ * Choppiness Index (CHOP). >61.8 = mercado lateral, <38.2 = tendencia fuerte.
+ */
+export function calculateChoppinessIndex(highs, lows, closes, period = 14) {
+  if (highs.length < period + 1) return [];
+
+  const trList = [];
+  for (let i = 1; i < highs.length; i++) {
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    );
+    trList.push(tr);
+  }
+
+  const result = [];
+  for (let i = period - 1; i < trList.length; i++) {
+    let sumTR = 0;
+    let maxH = -Infinity;
+    let minL = Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      sumTR += trList[j];
+      // highs/lows están desplazados +1 respecto a trList (TR usa index i+1 del original)
+      maxH = Math.max(maxH, highs[j + 1]);
+      minL = Math.min(minL, lows[j + 1]);
+    }
+    const range = maxH - minL;
+    if (range <= 0) {
+      result.push(50);
+      continue;
+    }
+    const chop = 100 * Math.log10(sumTR / range) / Math.log10(period);
+    result.push(chop);
+  }
+  return result;
+}
+
+/**
+ * Bollinger Band Width — normalized (upper-lower)/middle
+ */
+export function calculateBBW(closes, period = 20, stdDev = 2) {
+  if (closes.length < period) return [];
+  const bb = BollingerBands.calculate({ period, stdDev, values: closes });
+  return bb.map(b => (b.upper - b.lower) / b.middle);
+}
+
+/**
+ * Percentile rank de un valor dentro de una serie
+ */
+function percentileRank(series, value) {
+  if (series.length === 0) return 0;
+  let count = 0;
+  for (const v of series) if (v <= value) count++;
+  return (count / series.length) * 100;
+}
+
+// ============================================================
+//  ESTRATEGIA V4-A — Adaptive Trend (Supertrend + Chandelier)
+// ============================================================
+/**
+ * Filosofía: menos parámetros, indicadores adaptativos a volatilidad.
+ *  - ENTRADA: Supertrend(10,3) cruce a +1 + Precio > EMA50 + CHOP(14) < 50 + MFI > 40
+ *  - SALIDA: SOLO por engine (Chandelier ATR trail) — sin condiciones por indicador
+ */
+export function evaluateStrategyV4A(candles) {
+  const { closes, highs, lows, volumes } = candles;
+  if (closes.length < 105) return 'HOLD';
+
+  const st = calculateSupertrend(highs, lows, closes, 10, 3);
+  const emaTrend = calculateEMA(closes, 50);
+  const chop = calculateChoppinessIndex(highs, lows, closes, 14);
+  const mfi = MFI.calculate({ period: 14, high: highs, low: lows, close: closes, volume: volumes });
+
+  if (st.length < 3 || chop.length === 0 || mfi.length === 0) return 'HOLD';
+
+  const stNow = st[st.length - 1];
+  const stPrev = st[st.length - 2];
+  const price = closes[closes.length - 1];
+  const trendNow = emaTrend[emaTrend.length - 1];
+  const chopNow = chop[chop.length - 1];
+  const mfiNow = mfi[mfi.length - 1];
+
+  // Cruce ALCISTA del Supertrend (trend pasó de -1 → 1)
+  const supertrendFlippedUp = stPrev.trend === -1 && stNow.trend === 1;
+
+  if (supertrendFlippedUp && price > trendNow && chopNow < 50 && mfiNow > 40) {
+    return 'BUY';
+  }
+
+  // Cruce BAJISTA — señal explícita de salida (engine también maneja Chandelier)
+  if (stPrev.trend === 1 && stNow.trend === -1) {
+    return 'SELL';
+  }
+
+  return 'HOLD';
+}
+
+// ============================================================
+//  ESTRATEGIA V4-B — V3 entries + ATR-adaptive exits
+// ============================================================
+/**
+ * Mismas entradas que V3 (probadas) pero deja el manejo de exit al engine
+ * con modo ATR (SL = 2×ATR, Chandelier trail = 3×ATR). No emite señal SELL
+ * salvo RSI > 82 (más permisivo que V3 para evitar salidas prematuras).
+ */
+export function evaluateStrategyV4B(candles) {
+  const { closes, highs, lows, volumes } = candles;
+  if (closes.length < 105) return 'HOLD';
+
+  const emaFast = calculateEMA(closes, 12);
+  const emaSlow = calculateEMA(closes, 26);
+  const emaTrend = calculateEMA(closes, 50);
+  const rsi = calculateRSI(closes, 14);
+  const adxValues = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+  const mfiValues = MFI.calculate({ period: 14, high: highs, low: lows, close: closes, volume: volumes });
+
+  if (adxValues.length < 2 || mfiValues.length === 0 || emaFast.length < 3 || emaSlow.length < 3) {
+    return 'HOLD';
+  }
+
+  const price = closes[closes.length - 1];
+  const rsiNow = rsi[rsi.length - 1];
+  const adxNow = adxValues[adxValues.length - 1].adx;
+  const mfiNow = mfiValues[mfiValues.length - 1];
+
+  const fastNow = emaFast[emaFast.length - 1];
+  const fastPrev = emaFast[emaFast.length - 2];
+  const fastPrev2 = emaFast[emaFast.length - 3];
+  const slowNow = emaSlow[emaSlow.length - 1];
+  const slowPrev = emaSlow[emaSlow.length - 2];
+  const slowPrev2 = emaSlow[emaSlow.length - 3];
+  const trendNow = emaTrend[emaTrend.length - 1];
+
+  const isGoldenCross = fastPrev2 <= slowPrev2 && fastPrev > slowPrev && fastNow > slowNow;
+  const hasTrend = adxNow > 25;
+  const isUptrend = price > trendNow;
+  const rsiHealthy = rsiNow > 40 && rsiNow < 65;
+  const mfiHealthy = mfiNow > 40;
+
+  if (isGoldenCross && hasTrend && rsiHealthy && isUptrend && mfiHealthy) {
+    return 'BUY';
+  }
+  // Sólo salida por RSI muy extremo — deja al engine el trabajo
+  if (rsiNow > 82) return 'SELL';
+  return 'HOLD';
+}
+
+// ============================================================
+//  ESTRATEGIA V4-C — V3 + regime gate (CHOP + BBW)
+// ============================================================
+/**
+ * V3 entries idénticas + dos filtros adicionales para evitar mercados
+ * incompatibles:
+ *  - CHOP(14) < 45 → mercado en tendencia clara
+ *  - BBW(20) en percentil > 30 del rolling 100 → hay vol suficiente
+ */
+export function evaluateStrategyV4C(candles, opts = {}) {
+  const chopMax = opts.chopMax ?? 45;
+  const bbwPctMin = opts.bbwPctMin ?? 30;
+  const { closes, highs, lows, volumes } = candles;
+  if (closes.length < 120) return 'HOLD';
+
+  const emaFast = calculateEMA(closes, 12);
+  const emaSlow = calculateEMA(closes, 26);
+  const emaTrend = calculateEMA(closes, 50);
+  const rsi = calculateRSI(closes, 14);
+  const adxValues = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+  const mfiValues = MFI.calculate({ period: 14, high: highs, low: lows, close: closes, volume: volumes });
+  const chop = calculateChoppinessIndex(highs, lows, closes, 14);
+  const bbw = calculateBBW(closes, 20, 2);
+
+  if (adxValues.length < 2 || mfiValues.length === 0 || emaFast.length < 3 ||
+      emaSlow.length < 3 || chop.length === 0 || bbw.length < 50) {
+    return 'HOLD';
+  }
+
+  const price = closes[closes.length - 1];
+  const rsiNow = rsi[rsi.length - 1];
+  const adxNow = adxValues[adxValues.length - 1].adx;
+  const mfiNow = mfiValues[mfiValues.length - 1];
+  const chopNow = chop[chop.length - 1];
+
+  // Rolling percentile rank de BBW sobre últimas 100 velas
+  const bbwWindow = bbw.slice(-100);
+  const bbwNow = bbwWindow[bbwWindow.length - 1];
+  const bbwPctRank = percentileRank(bbwWindow, bbwNow);
+
+  const fastNow = emaFast[emaFast.length - 1];
+  const fastPrev = emaFast[emaFast.length - 2];
+  const fastPrev2 = emaFast[emaFast.length - 3];
+  const slowNow = emaSlow[emaSlow.length - 1];
+  const slowPrev = emaSlow[emaSlow.length - 2];
+  const slowPrev2 = emaSlow[emaSlow.length - 3];
+  const trendNow = emaTrend[emaTrend.length - 1];
+
+  const isGoldenCross = fastPrev2 <= slowPrev2 && fastPrev > slowPrev && fastNow > slowNow;
+  const hasTrend = adxNow > 25;
+  const isUptrend = price > trendNow;
+  const rsiHealthy = rsiNow > 40 && rsiNow < 65;
+  const mfiHealthy = mfiNow > 40;
+
+  // Nuevos filtros de régimen
+  const trendingRegime = chopNow < chopMax;
+  const livelyVol = bbwPctRank > bbwPctMin;
+
+  if (isGoldenCross && hasTrend && rsiHealthy && isUptrend && mfiHealthy &&
+      trendingRegime && livelyVol) {
+    return 'BUY';
+  }
+  if (rsiNow > 80) return 'SELL';
   return 'HOLD';
 }

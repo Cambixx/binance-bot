@@ -1,13 +1,14 @@
 import binance from './binanceService.js';
 import shadowTrader from './shadowTrader.js';
-import { evaluateStrategyV3 as evaluateStrategy } from './indicators.js';
+import { evaluateStrategyV4C as evaluateStrategy } from './indicators.js';
 
-// Configuración principal (Mismos parámetros que el Backtest V3)
-const INTERVAL = '15m'; 
+// Configuración principal (paridad con backtest V4C-COMBO)
+const INTERVAL = '15m';
 const TOP_COINS_LIMIT = 10;
+// BCH añadido tras backtest: -95 USDC consistente en 3 y 6 meses (WR 33-40%)
 const BLACKLIST = [
   'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
-  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE'
+  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE', 'BCH'
 ];
 
 // Defense-in-depth: gate explícito invocable en cualquier punto
@@ -15,14 +16,17 @@ function isBlacklisted(symbol) {
   return BLACKLIST.some(badCoin => symbol.includes(badCoin));
 }
 
-// Configuración de Riesgo V3 (post-audit 2026-05-18)
+// Opciones de filtro de régimen para V4-C (chop<50 y BBW pct>20)
+const STRATEGY_OPTS = { chopMax: 50, bbwPctMin: 20 };
+
+// Configuración de Riesgo V4C-COMBO
 const RISK_TP = 5.0;            // Take Profit
 const RISK_SL = 3.0;            // Stop Loss ampliado a 3.0% para absorber slippage real (~0.5pp medido)
 const TRAIL_ACTIVATION = 1.5;   // Activa trailing al +1.5%
-const TRAIL_DISTANCE = 0.30;    // Protege solo 30% del pico — deja más aire al upside
+const TRAIL_DISTANCE = 0.45;    // Protege 45% del pico (V4C-COMBO: mejor WR y holdout PF que 0.30)
 
 export async function runBot() {
-  console.log('🤖 Iniciando Binance Shadow Bot V3 (ADX + Trailing)...');
+  console.log('🤖 Iniciando Binance Shadow Bot V4C-COMBO (V3 + Regime Gate)...');
   
   try {
     const fullState = await shadowTrader.getFullState();
@@ -40,12 +44,12 @@ export async function runBot() {
     console.log(`🛡️ Monitorizando riesgo: ${monitoredSymbols.join(', ')}`);
 
     for (const symbol of monitoredSymbols) {
-      // 2. Obtener velas completas (OHLCV)
-      const klines = await binance.getKlines(symbol, INTERVAL, 120);
-      
-      if (klines.length < 110) continue;
+      // 2. Obtener velas completas (OHLCV) — V4-C necesita ≥120 (BBW rolling 100)
+      const klines = await binance.getKlines(symbol, INTERVAL, 130);
 
-      // Preparar datos para Strategy V3 (ADX necesita todo)
+      if (klines.length < 125) continue;
+
+      // Preparar datos para Strategy V4-C (ADX + CHOP + BBW necesitan OHLCV)
       const strategyData = {
         closes: klines.map(k => k.close),
         highs: klines.map(k => k.high),
@@ -57,17 +61,17 @@ export async function runBot() {
       const hasPos = openSymbols.includes(symbol);
       const canOpenNewPosition = symbols.includes(symbol);
 
-      // 3. Evaluar Señal de Entrada/Salida
-      const signal = evaluateStrategy(strategyData);
+      // 3. Evaluar Señal de Entrada/Salida (V4-C COMBO)
+      const signal = evaluateStrategy(strategyData, STRATEGY_OPTS);
 
       if (signal === 'BUY' && !hasPos && canOpenNewPosition && !isBlacklisted(symbol)) {
-        console.log(`\n🚨 [V3 SIGNAL] COMPRA DETECTADA: ${symbol} a ${currentPrice}`);
+        console.log(`\n🚨 [V4C SIGNAL] COMPRA DETECTADA: ${symbol} a ${currentPrice}`);
         await shadowTrader.buy(symbol, currentPrice, { trailActivationPct: TRAIL_ACTIVATION });
       } else if (signal === 'BUY' && !hasPos && isBlacklisted(symbol)) {
         console.warn(`⛔ [BLACKLIST GATE] Señal BUY bloqueada para ${symbol} (en blacklist)`);
       }
       else if (signal === 'SELL' && hasPos) {
-        console.log(`\n🚨 [V3 SIGNAL] VENTA (RSI SOBRECOMPRA): ${symbol} a ${currentPrice}`);
+        console.log(`\n🚨 [V4C SIGNAL] VENTA (RSI SOBRECOMPRA): ${symbol} a ${currentPrice}`);
         await shadowTrader.sell(symbol, currentPrice, 'SIGNAL');
         continue; // Pasamos a la siguiente moneda
       }
@@ -89,7 +93,7 @@ export async function runBot() {
 
         // Lógica de Trailing Stop Dinámico
         if (profitPct >= TRAIL_ACTIVATION && !pos.trailingActivated) {
-          console.log(`\n🔄 [V3] Trailing Stop ACTIVADO para ${symbol} (Profit: ${profitPct.toFixed(2)}%)`);
+          console.log(`\n🔄 [V4C] Trailing Stop ACTIVADO para ${symbol} (Profit: ${profitPct.toFixed(2)}%)`);
           await shadowTrader.updatePosition(symbol, { trailingActivated: true });
           pos.trailingActivated = true;
         }
@@ -101,7 +105,7 @@ export async function runBot() {
           const trailingSLPrice = pos.buyPrice * (1 + trailLevel / 100);
 
           if (currentPrice <= trailingSLPrice) {
-            console.log(`\n📉 [V3] TRAILING STOP ALCANZADO PARA ${symbol} (${profitPct.toFixed(2)}%)`);
+            console.log(`\n📉 [V4C] TRAILING STOP ALCANZADO PARA ${symbol} (${profitPct.toFixed(2)}%)`);
             await shadowTrader.sell(symbol, currentPrice, 'TRAILING_STOP');
             continue;
           }
@@ -109,10 +113,10 @@ export async function runBot() {
 
         // Stop Loss y Take Profit fijos
         if (profitPct >= RISK_TP) {
-          console.log(`\n🎯 [V3] TAKE PROFIT ALCANZADO PARA ${symbol}`);
+          console.log(`\n🎯 [V4C] TAKE PROFIT ALCANZADO PARA ${symbol}`);
           await shadowTrader.sell(symbol, currentPrice, 'TAKE_PROFIT');
         } else if (profitPct <= -RISK_SL) {
-          console.log(`\n🛑 [V3] STOP LOSS ALCANZADO PARA ${symbol}`);
+          console.log(`\n🛑 [V4C] STOP LOSS ALCANZADO PARA ${symbol}`);
           await shadowTrader.sell(symbol, currentPrice, 'STOP_LOSS');
         }
       }
