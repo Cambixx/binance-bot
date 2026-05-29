@@ -515,3 +515,313 @@ export function evaluateStrategyV4C(candles, opts = {}) {
   if (rsiNow > 80) return 'SELL';
   return 'HOLD';
 }
+
+// ============================================================
+//  ESTRATEGIA V5 — Trend-Rider de BAJA FRECUENCIA
+// ============================================================
+/**
+ * Tesis (auditoría 2026-05-29): con 0.30% de coste round-trip por trade, hay que
+ * OPERAR MENOS y CAPTURAR MOVIMIENTOS GRANDES. En vez del churn de cruces EMA12/26
+ * (sin edge tras costes), V5:
+ *   - Solo opera en régimen alcista CONFIRMADO de fondo: EMA50 > EMA200 y precio > EMA200.
+ *   - Entra en el RECLAIM de la EMA de disparo (pullback que recupera) con ADX fuerte.
+ *   - SALE solo al romper la tendencia (cierre < EMA de salida) → deja correr la tendencia.
+ * Pocas señales, cada una persiguiendo un tramo grande de tendencia. El engine debe
+ * correr con TP "apagado" (alto) para no cortar al rider; el SL amplio es red de seguridad.
+ *
+ * @param {object} candles { closes, highs, lows }
+ * @param {object} opts { emaFast=50, emaSlow=200, exitEma=50, adxMin=20 }
+ */
+export function evaluateStrategyV5(candles, opts = {}) {
+  const emaFastP = opts.emaFast ?? 50;
+  const emaSlowP = opts.emaSlow ?? 200;
+  const exitEmaP = opts.exitEma ?? 50;
+  const adxMin = opts.adxMin ?? 20;
+  const { closes, highs, lows } = candles;
+
+  if (closes.length < emaSlowP + 5) return 'HOLD';
+
+  const emaFast = calculateEMA(closes, emaFastP);
+  const emaSlow = calculateEMA(closes, emaSlowP);
+  const exitEma = calculateEMA(closes, exitEmaP);
+  const adxValues = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+
+  if (emaFast.length < 2 || emaSlow.length < 2 || exitEma.length < 2 || adxValues.length < 1) {
+    return 'HOLD';
+  }
+
+  const price = closes[closes.length - 1];
+  const prevPrice = closes[closes.length - 2];
+  const fastNow = emaFast[emaFast.length - 1];
+  const slowNow = emaSlow[emaSlow.length - 1];
+  const exitNow = exitEma[exitEma.length - 1];
+  const exitPrev = exitEma[exitEma.length - 2];
+  const adxNow = adxValues[adxValues.length - 1].adx;
+
+  // Régimen alcista de fondo
+  const uptrendRegime = fastNow > slowNow && price > slowNow;
+  // Reclaim: el precio recupera la EMA de disparo desde abajo (entrada en pullback)
+  const reclaim = prevPrice <= exitPrev && price > exitNow;
+
+  if (uptrendRegime && adxNow > adxMin && reclaim) return 'BUY';
+  // Salida: ruptura de tendencia (cierre bajo la EMA de salida)
+  if (price < exitNow) return 'SELL';
+  return 'HOLD';
+}
+
+// ============================================================
+//  ESTRATEGIA V6 — Adaptive SuperTrend (port de "Self-Aware Trend System")
+// ============================================================
+/**
+ * Adaptación LONG-ONLY del indicador SATS de WillyAlgoTrader. Núcleo destilado:
+ *  - SuperTrend cuyo ANCHO DE BANDA se modula por un Trend Quality Index (TQI 0..1)
+ *    de 4 factores: Efficiency Ratio (Kaufman), régimen de volatilidad (Z de volumen),
+ *    estructura (posición en rango) y persistencia de momento.
+ *  - Alta calidad → bandas estrechas (sigue de cerca); baja calidad → bandas anchas
+ *    (menos whipsaw). Ataca directamente el churn que hundió a V4-A (SuperTrend simple).
+ *  - ATR ponderado por eficiencia: effATR = ATR*(0.5 + 0.5*ER).
+ *  - Bandas asimétricas: el lado activo (dirección de tendencia) se estrecha.
+ * Señal: BUY en giro alcista del SuperTrend, SELL (a cash) en giro bajista.
+ * Omitido respecto al original: short, auto-calibración experimental, scoring de display,
+ * y el character-flip (inerte en su config por defecto: la condición close<source nunca
+ * se cumple con source=close).
+ *
+ * @param {object} candles { closes, highs, lows, volumes }
+ * @param {object} opts parámetros (ver defaults abajo)
+ */
+export function evaluateStrategyV6(candles, opts = {}) {
+  const atrLen    = opts.atrLen ?? 13;
+  const baseMult  = opts.baseMult ?? 2.0;
+  const erLen     = opts.erLen ?? 20;
+  const qStr      = opts.qStrength ?? 0.4;     // influencia de la calidad sobre el ancho
+  const qCurve    = opts.qCurve ?? 1.5;        // no-linealidad
+  const useAsym   = opts.useAsym ?? true;
+  const asymStr   = opts.asymStrength ?? 0.5;
+  const useEffAtr = opts.useEffAtr ?? true;
+  const structLen = opts.structLen ?? 20;
+  const momLen    = opts.momLen ?? 10;
+  const volLen    = opts.volLen ?? 20;
+  const baseLen   = opts.atrBaseLen ?? 100;
+  const wEr = 0.35, wVol = 0.20, wStruct = 0.25, wMom = 0.20;
+  const wSum = wEr + wVol + wStruct + wMom;
+
+  const { closes, highs, lows, volumes } = candles;
+  const n = closes.length;
+  const need = Math.max(atrLen, erLen, structLen, momLen, volLen, baseLen) + 5;
+  if (n < need + 5) return 'HOLD';
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const mapClamp = (v, inLo, inHi, outLo, outHi) => {
+    const t = clamp((v - inLo) / (inHi - inLo || 1), 0, 1);
+    return outLo + t * (outHi - outLo);
+  };
+
+  // True Range + ATR (Wilder RMA), alineado al índice de close
+  const tr = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    tr[i] = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    );
+  }
+  const atr = new Array(n).fill(NaN);
+  let seed = 0;
+  for (let i = 1; i <= atrLen; i++) seed += tr[i];
+  atr[atrLen] = seed / atrLen;
+  for (let i = atrLen + 1; i < n; i++) atr[i] = (atr[i - 1] * (atrLen - 1) + tr[i]) / atrLen;
+
+  const hasVolume = volumes && volumes.some(v => v > 0);
+
+  // Construir la serie del SuperTrend adaptativo (estado vía ratchet de bandas)
+  const startIdx = need;
+  let prevTrend = 1;
+  let prevUpper = NaN;
+  let prevLower = NaN;
+  let lastFlip = 'HOLD';
+  // Suavizado EMA de multiplicadores (autor: "RECOMMENDED ON", evita compresión brusca)
+  const useMultSmooth = opts.multSmooth ?? true;
+  const SMOOTH_ALPHA = 0.15;
+  let activeMultSm = NaN, passiveMultSm = NaN;
+
+  for (let i = startIdx; i < n; i++) {
+    const atrV = atr[i];
+    if (!isFinite(atrV)) continue;
+
+    // Efficiency Ratio (Kaufman)
+    let recorrido = 0;
+    for (let k = i - erLen + 1; k <= i; k++) recorrido += Math.abs(closes[k] - closes[k - 1]);
+    const er = recorrido !== 0 ? Math.abs(closes[i] - closes[i - erLen]) / recorrido : 0;
+
+    // Régimen de volatilidad
+    let atrSum = 0, atrCnt = 0;
+    for (let k = i - baseLen + 1; k <= i; k++) { if (isFinite(atr[k])) { atrSum += atr[k]; atrCnt++; } }
+    const atrBase = atrCnt > 0 ? atrSum / atrCnt : atrV;
+    const volRatio = atrBase !== 0 ? atrV / atrBase : 1;
+    let tqiVol;
+    if (hasVolume) {
+      let vMean = 0; for (let k = i - volLen + 1; k <= i; k++) vMean += volumes[k]; vMean /= volLen;
+      let vVar = 0; for (let k = i - volLen + 1; k <= i; k++) vVar += (volumes[k] - vMean) ** 2; vVar /= volLen;
+      const vStd = Math.sqrt(vVar);
+      const volZ = vStd !== 0 ? (volumes[i] - vMean) / vStd : 0;
+      tqiVol = mapClamp(volZ, -1, 2, 0, 1);
+    } else {
+      tqiVol = mapClamp(volRatio, 0.6, 1.8, 0, 1);
+    }
+
+    // Estructura (posición en el rango)
+    let hi = -Infinity, lo = Infinity;
+    for (let k = i - structLen + 1; k <= i; k++) { if (highs[k] > hi) hi = highs[k]; if (lows[k] < lo) lo = lows[k]; }
+    const rng = hi - lo;
+    const pricePos = rng !== 0 ? (closes[i] - lo) / rng : 0.5;
+    const tqiStruct = clamp(Math.abs(pricePos - 0.5) * 2, 0, 1);
+
+    // Persistencia de momento
+    const windowChange = closes[i] - closes[i - momLen];
+    let aligned = 0;
+    for (let k = 0; k < momLen; k++) {
+      const barChange = closes[i - k] - closes[i - k - 1];
+      if ((windowChange > 0 && barChange > 0) || (windowChange < 0 && barChange < 0)) aligned++;
+    }
+    const tqiMom = aligned / momLen;
+
+    const tqiEr = clamp(er, 0, 1);
+    const tqi = clamp((tqiEr * wEr + tqiVol * wVol + tqiStruct * wStruct + tqiMom * wMom) / wSum, 0, 1);
+
+    // ATR ponderado por eficiencia
+    const effAtr = useEffAtr ? atrV * (0.5 + 0.5 * er) : atrV;
+
+    // Multiplicador adaptativo (no-lineal según calidad)
+    const qualityDev = Math.pow(1 - tqi, qCurve);
+    const tqiMult = 1 - qStr + qStr * (0.6 + 0.8 * qualityDev);
+    const symMult = baseMult * tqiMult;
+    let activeMultRaw = symMult, passiveMultRaw = symMult;
+    if (useAsym) {
+      activeMultRaw = symMult * (1 - asymStr * tqi * 0.3);
+      passiveMultRaw = symMult * (1 + asymStr * tqi * 0.4);
+    }
+    // EMA-smooth de los multiplicadores antes de aplicarlos
+    activeMultSm = isNaN(activeMultSm) ? activeMultRaw : (useMultSmooth ? activeMultSm * (1 - SMOOTH_ALPHA) + activeMultRaw * SMOOTH_ALPHA : activeMultRaw);
+    passiveMultSm = isNaN(passiveMultSm) ? passiveMultRaw : (useMultSmooth ? passiveMultSm * (1 - SMOOTH_ALPHA) + passiveMultRaw * SMOOTH_ALPHA : passiveMultRaw);
+    const activeMult = activeMultSm;
+    const passiveMult = passiveMultSm;
+    const lowerMult = prevTrend === 1 ? activeMult : passiveMult;
+    const upperMult = prevTrend === 1 ? passiveMult : activeMult;
+
+    const lowerRaw = closes[i] - lowerMult * effAtr;
+    const upperRaw = closes[i] + upperMult * effAtr;
+
+    // Ratchet de bandas (igual que SuperTrend clásico)
+    const lower = isNaN(prevLower) ? lowerRaw : (closes[i - 1] > prevLower ? Math.max(lowerRaw, prevLower) : lowerRaw);
+    const upper = isNaN(prevUpper) ? upperRaw : (closes[i - 1] < prevUpper ? Math.min(upperRaw, prevUpper) : upperRaw);
+
+    const flipUp = prevTrend === -1 && closes[i] > (isNaN(prevUpper) ? upperRaw : prevUpper);
+    const flipDown = prevTrend === 1 && closes[i] < (isNaN(prevLower) ? lowerRaw : prevLower);
+    const trend = flipUp ? 1 : (flipDown ? -1 : prevTrend);
+
+    if (i === n - 1) {
+      if (trend === 1 && prevTrend === -1) lastFlip = 'BUY';
+      else if (trend === -1 && prevTrend === 1) lastFlip = 'SELL';
+      else lastFlip = 'HOLD';
+    }
+
+    prevTrend = trend;
+    prevUpper = upper;
+    prevLower = lower;
+  }
+
+  return lastFlip;
+}
+
+// ============================================================
+//  FAMILIA DIARIA (baja frecuencia) — investigación 2026-05-30
+// ============================================================
+// Objetivo realista: participar de la subida con MUCHO menos drawdown,
+// NO generar alfa. Supervivencia a costes garantizada por baja frecuencia
+// (1-8 trades/año/activo). Diseñadas para 'signal' exit (la propia regla
+// es el trailing stop; sin TP/SL fijo) y timeframe DIARIO.
+
+/** SMA simple del último valor sobre los últimos `period` cierres */
+function smaLast(closes, period) {
+  const n = closes.length;
+  if (n < period) return NaN;
+  let s = 0;
+  for (let i = n - period; i < n; i++) s += closes[i];
+  return s / period;
+}
+
+/**
+ * ESTRATEGIA SMA200 (Faber / market-timing de régimen) — rank 3 de la investigación.
+ * La mejor evidencia cost-aware/OOS. In-or-out: invertido si close > SMA(period), cash si no.
+ * BUY/SELL se emiten de forma continua; el engine compra una vez y vende una vez (in-or-out).
+ */
+export function evaluateStrategySMA200(candles, opts = {}) {
+  const period = opts.smaPeriod ?? 200;
+  const { closes } = candles;
+  if (closes.length < period + 1) return 'HOLD';
+  const sma = smaLast(closes, period);
+  const price = closes[closes.length - 1];
+  if (price > sma) return 'BUY';
+  if (price < sma) return 'SELL';
+  return 'HOLD';
+}
+
+/**
+ * ESTRATEGIA SuperTrend DIARIO — rank 1. Reutiliza calculateSupertrend(10,3).
+ * BUY mientras la tendencia del SuperTrend es alcista (+ gate opcional close>SMA200),
+ * SELL cuando flipea a bajista. La banda ATR ES el trailing stop adaptativo.
+ */
+export function evaluateStrategySupertrendDaily(candles, opts = {}) {
+  const period = opts.stPeriod ?? 10;
+  const mult = opts.stMult ?? 3.0;
+  const smaPeriod = opts.smaPeriod ?? 200;
+  const useRegime = opts.useRegime ?? false;
+  const { closes, highs, lows } = candles;
+  const n = closes.length;
+  const need = Math.max(period + 2, useRegime ? smaPeriod : 0) + 2;
+  if (n < need) return 'HOLD';
+
+  const st = calculateSupertrend(highs, lows, closes, period, mult);
+  if (st.length < 1) return 'HOLD';
+  const trend = st[st.length - 1].trend;
+
+  let regimeOK = true;
+  if (useRegime) regimeOK = closes[n - 1] > smaLast(closes, smaPeriod);
+
+  if (trend === 1 && regimeOK) return 'BUY';
+  if (trend === -1) return 'SELL';
+  return 'HOLD';
+}
+
+/**
+ * ESTRATEGIA Donchian / Turtle System 2 (55/20) DIARIO — rank 2.
+ * BUY si close rompe el máximo de los `entryLen` días previos (+ gate close>SMA200);
+ * SELL si close cae por debajo del mínimo de los `exitLen` días previos; si no, HOLD
+ * (mantiene la posición → deja correr la tendencia). El canal de salida es el trailing stop.
+ */
+export function evaluateStrategyDonchian(candles, opts = {}) {
+  const entryLen = opts.entryLen ?? 55;
+  const exitLen = opts.exitLen ?? 20;
+  const smaPeriod = opts.smaPeriod ?? 200;
+  const useRegime = opts.useRegime ?? true;
+  const { closes, highs, lows } = candles;
+  const n = closes.length;
+  const need = Math.max(entryLen, exitLen, useRegime ? smaPeriod : 0) + 2;
+  if (n < need) return 'HOLD';
+
+  const price = closes[n - 1];
+  // Canales basados en CIERRES previos (coherente con ejecución a cierre del bot/backtest):
+  //   entrada = ruptura del máximo cierre de los `entryLen` días previos
+  //   salida  = pérdida del mínimo cierre de los `exitLen` días previos
+  let maxC = -Infinity;
+  for (let i = n - 1 - entryLen; i < n - 1; i++) if (closes[i] > maxC) maxC = closes[i];
+  let minC = Infinity;
+  for (let i = n - 1 - exitLen; i < n - 1; i++) if (closes[i] < minC) minC = closes[i];
+
+  let regimeOK = true;
+  if (useRegime) regimeOK = price > smaLast(closes, smaPeriod);
+
+  if (price > maxC && regimeOK) return 'BUY';
+  if (price < minC) return 'SELL';
+  return 'HOLD';
+}

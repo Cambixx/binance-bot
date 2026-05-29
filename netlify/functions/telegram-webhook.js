@@ -1,5 +1,6 @@
-import shadowTrader from '../../shadowTrader.js';
+import shadowTrader, { dailyTrader } from '../../shadowTrader.js';
 import telegramService from '../../telegramService.js';
+import binance from '../../binanceService.js';
 
 export default async (req) => {
   // Solo aceptamos peticiones POST de Telegram
@@ -26,21 +27,24 @@ export default async (req) => {
       return new Response("OK", { status: 200 });
     }
 
-    // Comando /status o /status-bot
+    // Comando /status o /status-bot — muestra AMBOS canales (15m y diario)
     if (text === '/status' || text === '/status-bot') {
-      const stats = await shadowTrader.getStats();
-      
-      const icon = parseFloat(stats.totalProfitUSDC) >= 0 ? '🟢' : '🔴';
-      
-      const reply = `🤖 <b>ESTADO DEL BOT (Shadow Mode)</b>\n\n` +
-        `<b>Capital Inicial:</b> ${stats.initialBalance} USDC\n` +
-        `<b>Total Equity:</b> ${stats.currentTotalEquity} USDC\n` +
-        `<b>Balance Disponible:</b> ${stats.availableBalance} USDC\n` +
-        `<b>Inmovilizado (Posiciones):</b> ${stats.investedEquity} USDC\n\n` +
-        `<b>Posiciones Abiertas:</b> ${stats.openPositionsCount}\n` +
-        `<b>Trades Completados:</b> ${stats.totalTrades}\n` +
-        `<b>Win Rate:</b> ${stats.winRate} (${stats.winningTrades}/${stats.totalTrades})\n\n` +
-        `<b>Beneficio Neto:</b> ${icon} ${stats.totalProfitUSDC} USDC`;
+      const channelBlock = async (trader, title) => {
+        const openSymbols = await trader.getOpenPositions();
+        const prices = openSymbols.length > 0 ? await binance.getPrices(openSymbols) : {};
+        const s = await trader.getStats(prices);
+        const icon = parseFloat(s.totalProfitUSDC) >= 0 ? '🟢' : '🔴';
+        const mktNote = s.pricedAtMarket ? '' : ' <i>(a coste)</i>';
+        return `<b>━━ ${title} ━━</b>\n` +
+          `Equity: ${s.currentTotalEquity} USDC${mktNote} (inicial ${s.initialBalance})\n` +
+          `Disponible: ${s.availableBalance} | Invertido: ${s.investedEquity}\n` +
+          `Posiciones: ${s.openPositionsCount} | Trades: ${s.totalTrades} | WR: ${s.winRate}\n` +
+          `P&L: realizado ${s.realizedPnLUSDC} + latente ${s.unrealizedPnLUSDC} = ${icon} <b>${s.totalProfitUSDC} USDC</b>`;
+      };
+
+      const block15m = await channelBlock(shadowTrader, '📡 V4C-15m (señales)');
+      const blockDaily = await channelBlock(dailyTrader, '📅 SMA200-1d (regime-timer)');
+      const reply = `🤖 <b>ESTADO DEL BOT (Shadow Mode)</b>\n\n${block15m}\n\n${blockDaily}`;
 
       await telegramService.sendMessage(reply);
     }

@@ -2,16 +2,13 @@ import axios from 'axios';
 import {
   evaluateStrategy, evaluateStrategyV2, evaluateStrategyV3,
   evaluateStrategyV4A, evaluateStrategyV4B, evaluateStrategyV4C,
+  evaluateStrategyV5, evaluateStrategyV6,
+  evaluateStrategySMA200, evaluateStrategySupertrendDaily, evaluateStrategyDonchian,
   calculateATR
 } from './indicators.js';
+import { BLACKLIST, RISK, COSTS } from './config.js';
 
 const BINANCE_API_BASE = 'https://data-api.binance.vision/api/v3';
-
-// Misma Blacklist que bot.js para coherencia total
-const BLACKLIST = [
-  'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
-  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE', 'BCH'
-];
 
 class BacktestEngine {
   constructor(options = {}) {
@@ -21,12 +18,17 @@ class BacktestEngine {
     this.months = options.months || 3;
     this.strategyVersion = options.strategyVersion || '4C'; // default paridad bot.js (V4C-COMBO)
 
-    // Risk management (V4C-COMBO post-backtest 2026-05-21)
-    this.takeProfitPct = options.takeProfitPct || 5.0;
-    this.stopLossPct = options.stopLossPct || 3.0;
-    this.trailingActivation = options.trailingActivation || 1.5;
-    this.trailingDistance = options.trailingDistance || 0.45;     // V4C-COMBO: protege 45% del pico
-    this.cooldownCandles = options.cooldownCandles || 12; // 12 velas (3h) de cooldown tras un SL
+    // Risk management (defaults centralizados en config.js → paridad live)
+    this.takeProfitPct = options.takeProfitPct ?? RISK.takeProfitPct;
+    this.stopLossPct = options.stopLossPct ?? RISK.stopLossPct;
+    this.trailingActivation = options.trailingActivation ?? RISK.trailingActivation;
+    this.trailingDistance = options.trailingDistance ?? RISK.trailingDistance;
+    this.cooldownCandles = options.cooldownCandles ?? RISK.cooldownCandles;
+    this.positionSizePct = options.positionSizePct ?? RISK.positionSizePct;
+
+    // Costes de transacción (fees + slippage) — netados en cada trade. Ver config.js / auditoría.
+    this.feePct = options.feePct ?? COSTS.feePct;
+    this.slippagePct = options.slippagePct ?? COSTS.slippagePct;
 
     // Exit mode: 'fixed' = TP/SL/trailing% clásicos | 'atr' = Chandelier (ATR-based) + ATR SL
     this.exitMode = options.exitMode || 'fixed';
@@ -37,6 +39,13 @@ class BacktestEngine {
 
     // Regime-gate params (V4-C)
     this.regimeOpts = options.regimeOpts || {};
+
+    // Datos pre-descargados (sweep.js reutiliza una sola descarga entre combos)
+    this.dataBySymbol = options.dataBySymbol || null;
+
+    // Buffer/warmup configurables (V5 usa EMA200 → necesita ventana mayor)
+    this.bufferSize = options.bufferSize ?? 120;
+    this.minCandles = options.minCandles ?? 105;
 
     // Validación out-of-sample: split temporal train/holdout
     this.oosSplitRatio = options.oosSplitRatio ?? 0.7; // 70% train, 30% holdout
@@ -114,14 +123,22 @@ class BacktestEngine {
     } else {
       console.log(`🎯 TP: +${this.takeProfitPct}% | SL: -${this.stopLossPct}% | Trail: +${this.trailingActivation}%→${(this.trailingDistance * 100).toFixed(0)}%peak`);
     }
-    
+    const rtCost = ((this.feePct + this.slippagePct) * 2 * 100).toFixed(2);
+    console.log(`💸 Costes: fee ${(this.feePct*100).toFixed(2)}%/lado + slippage ${(this.slippagePct*100).toFixed(2)}%/lado = ${rtCost}% round-trip`);
+
     this.symbols = this.filterSymbols(this.symbols);
     console.log(`🪙 Símbolos válidos: ${this.symbols.join(', ')}`);
-    
-    // 1. Descargar todos los datos
-    const dataBySymbol = {};
-    for (const symbol of this.symbols) {
-      dataBySymbol[symbol] = await this.fetchHistoricalData(symbol);
+
+    // 1. Datos: usar los inyectados (sweep reutiliza la descarga) o descargar
+    let dataBySymbol;
+    if (this.dataBySymbol) {
+      dataBySymbol = {};
+      for (const symbol of this.symbols) dataBySymbol[symbol] = this.dataBySymbol[symbol] || [];
+    } else {
+      dataBySymbol = {};
+      for (const symbol of this.symbols) {
+        dataBySymbol[symbol] = await this.fetchHistoricalData(symbol);
+      }
     }
 
     // 2. Crear eventos cronológicos unificados
@@ -139,6 +156,12 @@ class BacktestEngine {
       const splitDate = new Date(this.splitTime).toISOString().slice(0, 10);
       console.log(`🔀 OOS split (${(this.oosSplitRatio*100).toFixed(0)}/${((1-this.oosSplitRatio)*100).toFixed(0)}): train hasta ${splitDate}, holdout después`);
     }
+
+    // Benchmark buy&hold equiponderado por fase (referencia honesta: el objetivo es mejor
+    // Sharpe/drawdown que HODL del MISMO periodo, no batir a cash)
+    this.buyHold = this.computeBuyHold(dataBySymbol);
+    this.buyHoldTrain = this.computeBuyHold(dataBySymbol, null, this.splitTime);
+    this.buyHoldHoldout = this.computeBuyHold(dataBySymbol, this.splitTime, null);
 
     // Buffers OHLCV por símbolo (V3 necesita high, low, volume además de close)
     const candleBuffers = {};
@@ -160,8 +183,8 @@ class BacktestEngine {
       buf.volumes.push(volume);
       currentPrices[symbol] = close;
       
-      // Mantener buffer de 120 velas
-      const maxBuf = 120;
+      // Mantener buffer (configurable; V5 necesita >200 para EMA200)
+      const maxBuf = this.bufferSize;
       if (buf.closes.length > maxBuf) {
         buf.closes.shift();
         buf.highs.shift();
@@ -174,7 +197,7 @@ class BacktestEngine {
         this.state.cooldowns[symbol]--;
       }
 
-      if (buf.closes.length < 105) continue;
+      if (buf.closes.length < this.minCandles) continue;
 
       // Evaluar Estrategia según versión
       let signal;
@@ -185,6 +208,11 @@ class BacktestEngine {
         case '4A': signal = evaluateStrategyV4A(buf); break;
         case '4B': signal = evaluateStrategyV4B(buf); break;
         case '4C': signal = evaluateStrategyV4C(buf, this.regimeOpts); break;
+        case '5':  signal = evaluateStrategyV5(buf, this.regimeOpts); break;
+        case '6':  signal = evaluateStrategyV6(buf, this.regimeOpts); break;
+        case 'SMA200':   signal = evaluateStrategySMA200(buf, this.regimeOpts); break;
+        case 'STDAY':    signal = evaluateStrategySupertrendDaily(buf, this.regimeOpts); break;
+        case 'DONCHIAN': signal = evaluateStrategyDonchian(buf, this.regimeOpts); break;
         default:   signal = evaluateStrategyV3(buf);
       }
 
@@ -204,8 +232,9 @@ class BacktestEngine {
         this.executeSell(symbol, close, time, 'SIGNAL');
       }
 
-      // Lógica de salida (ATR vs fixed)
-      if (hasPosition && this.state.openPositions[symbol]) {
+      // Lógica de salida. 'signal' = la propia estrategia (SELL) gestiona la salida;
+      // sin TP/SL/trailing (la regla del indicador ES el trailing stop). Para la familia diaria.
+      if (this.exitMode !== 'signal' && hasPosition && this.state.openPositions[symbol]) {
         const pos = this.state.openPositions[symbol];
 
         // Actualizar precio máximo alcanzado (común a ambos modos)
@@ -234,16 +263,19 @@ class BacktestEngine {
   }
 
   executeBuy(symbol, price, time, entryATR = null) {
-    const investAmount = this.state.balance * 0.20;
-    // Eliminado el bloqueo de saldo < 10 para ver todas las operaciones
+    const investAmount = this.state.balance * this.positionSizePct;
 
+    // Costes de entrada: slippage (peor precio de compra) + comisión sobre el notional.
+    // amountCrypto se reduce por ambos → el coste queda baked-in en el P&L y la equity.
+    const fillPrice = price * (1 + this.slippagePct);
+    const buyFee = investAmount * this.feePct;
+    const amountCrypto = (investAmount - buyFee) / fillPrice;
 
-    const amountCrypto = investAmount / price;
     this.state.balance -= investAmount;
     this.state.openPositions[symbol] = {
       amount: amountCrypto,
-      buyPrice: price,
-      invested: investAmount,
+      buyPrice: price,        // precio de mercado RAW (base de los umbrales TP/SL/trailing)
+      invested: investAmount, // capital comprometido (incluye fee de entrada)
       time: new Date(time).toISOString(),
       trailingActivated: false,
       trailingSL: 0,
@@ -293,7 +325,10 @@ class BacktestEngine {
       const targetPrice = pos.buyPrice + this.partialExitAtR * R;
       if (close >= targetPrice) {
         const halfAmount = pos.amount * 0.5;
-        const returnAmount = halfAmount * close;
+        // Costes de salida también en la toma parcial
+        const fillPrice = close * (1 - this.slippagePct);
+        const grossReturn = halfAmount * fillPrice;
+        const returnAmount = grossReturn - grossReturn * this.feePct;
         const halfInvested = pos.invested * 0.5;
         const partialProfit = returnAmount - halfInvested;
         const partialPct = (partialProfit / halfInvested) * 100;
@@ -329,7 +364,11 @@ class BacktestEngine {
     const pos = this.state.openPositions[symbol];
     if (!pos) return;
 
-    const returnAmount = pos.amount * price;
+    // Costes de salida: slippage (peor precio de venta) + comisión sobre el retorno bruto.
+    const fillPrice = price * (1 - this.slippagePct);
+    const grossReturn = pos.amount * fillPrice;
+    const sellFee = grossReturn * this.feePct;
+    const returnAmount = grossReturn - sellFee;
     const profit = returnAmount - pos.invested;
     const profitPct = (profit / pos.invested) * 100;
 
@@ -349,6 +388,38 @@ class BacktestEngine {
     });
 
     delete this.state.openPositions[symbol];
+  }
+
+  // Buy&hold equiponderado opcionalmente acotado a [fromTime, toTime). Normaliza CADA
+  // símbolo a su primer close DENTRO de la ventana → ROI y MaxDD del índice equiponderado.
+  computeBuyHold(dataBySymbol, fromTime = null, toTime = null) {
+    const syms = Object.keys(dataBySymbol).filter(s => (dataBySymbol[s] || []).length > 0);
+    if (syms.length === 0) return { roi: 0, maxDrawdown: 0 };
+    const inWin = t => (fromTime === null || t >= fromTime) && (toTime === null || t < toTime);
+    const norm = {};
+    syms.forEach(s => {
+      const d = dataBySymbol[s].filter(k => inWin(k.time));
+      if (d.length === 0) { norm[s] = new Map(); return; }
+      const first = d[0].close;
+      const m = new Map();
+      d.forEach(k => m.set(k.time, k.close / first));
+      norm[s] = m;
+    });
+    const times = [...new Set(syms.flatMap(s => [...norm[s].keys()]))].sort((a, b) => a - b);
+    let peak = -Infinity, maxDD = 0, firstVal = null, lastVal = null;
+    for (const t of times) {
+      let sum = 0, cnt = 0;
+      for (const s of syms) { const v = norm[s].get(t); if (v !== undefined) { sum += v; cnt++; } }
+      if (cnt === 0) continue;
+      const val = sum / cnt;
+      if (firstVal === null) firstVal = val;
+      lastVal = val;
+      if (val > peak) peak = val;
+      const dd = (peak - val) / peak * 100;
+      if (dd > maxDD) maxDD = dd;
+    }
+    const roi = firstVal ? (lastVal / firstVal - 1) * 100 : 0;
+    return { roi: parseFloat(roi.toFixed(2)), maxDrawdown: parseFloat(maxDD.toFixed(2)) };
   }
 
   recordEquity(time, currentPrices) {
@@ -468,6 +539,8 @@ class BacktestEngine {
       );
       trainMetrics.splitTime = splitIso;
       holdoutMetrics.splitTime = splitIso;
+      trainMetrics.buyHold = this.buyHoldTrain || null;
+      holdoutMetrics.buyHold = this.buyHoldHoldout || null;
     }
 
     return {
@@ -478,6 +551,12 @@ class BacktestEngine {
         symbols: this.symbols,
         strategy: strategyNames[this.strategyVersion] || 'V3 (ADX+Trailing)',
         oosSplitRatio: this.oosSplitRatio,
+        costs: {
+          feePct: this.feePct,
+          slippagePct: this.slippagePct,
+          roundTripPct: parseFloat(((this.feePct + this.slippagePct) * 2 * 100).toFixed(3))
+        },
+        buyHold: this.buyHold || null,
         ...fullMetrics
       },
       trainSummary: trainMetrics,

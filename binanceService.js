@@ -84,6 +84,26 @@ class BinanceService {
   }
 
   /**
+   * Obtiene el precio spot actual de uno o varios símbolos.
+   * Devuelve un mapa { SYMBOL: precio }. Usado para valorar posiciones a mercado.
+   */
+  async getPrices(symbols = []) {
+    if (!symbols || symbols.length === 0) return {};
+    try {
+      const response = await axios.get(`${BINANCE_API_BASE}/ticker/price`, {
+        params: { symbols: JSON.stringify(symbols) }
+      });
+      const out = {};
+      const arr = Array.isArray(response.data) ? response.data : [response.data];
+      arr.forEach(t => { out[t.symbol] = parseFloat(t.price); });
+      return out;
+    } catch (error) {
+      console.error('Error al obtener precios spot:', error.message);
+      return {};
+    }
+  }
+
+  /**
    * Obtiene las velas japonesas (K-lines) para un par y temporalidad específicos
    */
   async getKlines(symbol, interval = '15m', limit = 100) {

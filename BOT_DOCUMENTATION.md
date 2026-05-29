@@ -6,6 +6,30 @@ Este proyecto es un bot de trading automatizado diseñado para operar en Binance
 **Arquitectura principal:**
 El bot está construido en Node.js y diseñado para ejecutarse como una **función Serverless** en **Netlify**. Se ejecuta automáticamente cada 15 minutos mediante un Cron Job (`trader-cron.js`).
 
+**Dos canales shadow en paralelo (desde 2026-05-30):** el cron corre dos carteras virtuales INDEPENDIENTES para comparar enfoques con datos reales:
+- **📡 V4C-15m** (`bot.js` → blob `bot_state_v2`): generador de señales 15m (V4C-COMBO). Generador disciplinado, sin alfa demostrable neto de costes.
+- **📅 SMA200-1d** (`dailyBot.js` → blob `bot_state_daily_v1`): regime-timer DIARIO (estilo Faber). In-or-out: invertido si cierre diario > SMA200, cash si no. La estrategia validada que bate a buy&hold en riesgo-ajustado (§1.2). Idempotente intra-día (solo opera al cambiar la señal diaria).
+
+`/status` en Telegram muestra ambos canales lado a lado.
+
+### 1.1 Enfoque del proyecto — leer antes de "optimizar"
+Un barrido riguroso de 12 meses **con costes reales (0.30% round-trip)** sobre 19+ configuraciones (V3, V4C, V5, V6; 15m y 1h; ver `sweep.js`) demostró que **ninguna familia de TA intradía tiene un edge que sobreviva a los costes fuera de muestra** (todas con Profit Factor < 1.0 en el periodo completo). El alfa de análisis técnico retail en cripto líquido intradía neto de costes es prácticamente nulo.
+
+**El bot 15m (V4C-COMBO) NO es una máquina de alfa**: es un generador de señales disciplinado con reporting honesto. No perseguir alfa afinando indicadores en 15m.
+
+### 1.2 ✅ Familia DIARIA validada (2026-05-30) — el enfoque que SÍ funciona
+Tras investigación online consciente de costes, se implementaron estrategias **diarias de baja frecuencia** (`evaluateStrategySMA200` / `evaluateStrategySupertrendDaily` / `evaluateStrategyDonchian`). Backtest 36 meses, 7 large-caps, costes 0.30%, OOS, **comparado contra buy&hold del mismo periodo** (no contra cash):
+
+| Estrategia | Full ROI | Full MaxDD | Calmar | Holdout (= crash, HODL −44%/DD−64%) |
+|---|---|---|---|---|
+| **SMA200 diaria** | **+22.5%** (HODL +19.1%) | **−34.9%** (HODL −59.4%) | **0.64** (HODL 0.32) | −5.5%, DD −25.6% |
+| Donchian 55/20 + regime | +6.3% | −27.5% | 0.23 | −0.3%, DD −12.6% (la más defensiva) |
+| SuperTrend diario + regime | +13.6% | −30.9% | 0.44 | −2.8%, DD −20.4% |
+
+**Hallazgo clave:** la familia diaria **sobrevive a los costes** (baja frecuencia, ~20 trades/año en 7 monedas) y **mejora el retorno-ajustado-a-riesgo vs buy&hold**: SMA200 bate a HODL en retorno y recorta el drawdown ~41%. En el holdout (un mercado bajista donde HODL perdió −44%), preservó capital (−5%). Robusto: SMA150/200/250 forman un *plateau* (todas baten el Calmar de HODL); no es overfit.
+
+> **NO es alfa, es reducción de drawdown / preservación de capital (mejor Sharpe)** — el objetivo realista y honesto. Para llevarlo a producción habría que decidir si el bot live (que corre cada 15m) pasa a evaluar la señal DIARIA al cierre (regime-timer in-or-out) o se ejecuta en paralelo al generador de señales 15m. Es un cambio de naturaleza del bot, pendiente de decisión.
+
 ---
 
 ## 2. Estrategia de Trading (Evolución V1 → V4C-COMBO)
@@ -44,25 +68,43 @@ Los siguientes activos están excluidos del escaneo:
 *   **Añadido 18/05/2026 tras auditoría:** **DOGE**. En backtest de 12 meses acumuló -61.1% sobre la moneda en 114 trades.
 *   **Añadido 21/05/2026 tras backtest V4C-COMBO:** **BCH**. Pérdidas consistentes en 3 y 6 meses (-63 a -95 USDC, WR 33-40%) en todas las variantes probadas.
 
-### 2.4 Resultados de Backtest V4C-COMBO (3 meses, 7 monedas) — paridad live
-Comparativa frente al baseline V3 con los mismos símbolos y periodo:
+### 2.4 Resultados de Backtest V4C-COMBO — con costes reales (HONESTO)
 
-| Métrica | V3 baseline | **V4C-COMBO** | Mejora |
-|---|---|---|---|
-| ROI Full | 10.41% | **11.69%** | +12% |
-| Win Rate | 74.74% | **82.89%** | +8pp |
-| Profit Factor | 2.11 | **2.67** | +27% |
-| Max Drawdown | 3.07% | **2.59%** | -16% |
-| Expectancy | +$5.48/trade | **+$7.69/trade** | +40% |
-| Holdout PF (OOS) | 1.40 | **3.09** | +121% |
-| Holdout WR (OOS) | 65.2% | **80.0%** | +15pp |
-| ΔPF degradación train→holdout | -0.94 (overfit) | **+0.53** (mejora en OOS) | ✅ Robusta |
+> ⚠️ **Importante (auditoría 2026-05-29):** las cifras anteriores se calcularon SIN comisiones ni slippage y sobreestimaban el edge. El motor ahora **netea costes** (0.30% round-trip por defecto, ver §2.6). Estos son los números honestos.
 
-> **Veredicto OOS automático del engine:** "✅ Estrategia robusta: métricas consistentes train ↔ holdout".
+Impacto de los costes (V4C-COMBO, 3 meses, 7 monedas):
+
+| Métrica | Sin costes (idealizado) | **Con costes (0.30% RT)** |
+|---|---|---|
+| ROI Full | 5.94% | **2.25%** |
+| Win Rate | 79.22% | **72.73%** |
+| Profit Factor | 1.75 | **1.26** |
+| Expectancy | +$3.86/trade | **+$1.46/trade** |
+| **Holdout PF (OOS)** | — | **0.93** ❌ |
+| **Holdout ROI (OOS)** | — | **−0.25%** ❌ |
+
+> **Veredicto honesto:** V4C-COMBO tiene un edge fino que apenas sobrevive a los costes in-sample y es **ligeramente negativo out-of-sample**. NO es una estrategia ganadora demostrada tras costes. El siguiente objetivo del proyecto es encontrar/diseñar una estrategia cuyo edge sobreviva el 0.30% round-trip TAMBIÉN fuera de muestra. (Las cifras dependen del periodo y universo; correr `npm run backtest` para el dato vigente.)
 
 ### 2.5 Variantes descartadas durante la investigación
 *   **V4-A (Supertrend + Chandelier ATR):** ROI 4.15%, WR 34%, PF 1.12 → 450 trades, demasiado ruidoso en 15m crypto. La literatura cita Supertrend para timeframes 1h+. Implementación conservada en `indicators.js` para referencia.
 *   **V4-B (V3 entries + ATR exits):** ROI -0.21%, WR 29%, PF 0.98 → SL 2×ATR y trailing Chandelier 3×ATR son multiplicadores demasiado apretados para 15m altcoins; los stop-hunts se llevan los trades antes de moverse. Implementación conservada para experimentación.
+*   **V5 (trend-rider baja frecuencia) — FALLIDA:** la idea (operar poco, dejar correr tendencias) era buena, pero la implementación basada en "reclaim de EMA" resultó un generador de whipsaw (hasta 560 trades en 12m, PF 0.42-0.65, holdout ROI −26 a −29%). Conservada en `indicators.js` como `evaluateStrategyV5` documentada como experimento fallido. Un verdadero trend-rider pertenece a timeframe diario (Donchian), no a 15m.
+*   **V6 (Adaptive SuperTrend — port del indicador "Self-Aware Trend System" de TradingView) — FALLIDA:** SuperTrend con ancho de banda modulado por un Trend Quality Index (ER de Kaufman + volumen + estructura + momento), ATR ponderado por eficiencia y bandas asimétricas. La promesa era reducir el whipsaw del SuperTrend simple (V4-A), pero hizo lo CONTRARIO: las bandas adaptativas (≈1.5×ATR efectivo + ATR reducido en ruido) flipean aún más → **3.700+ trades en 12m, full PF 0.48, holdout ROI −75%, MaxDD 99%**. Probada incluso con el suavizado de multiplicadores que el autor recomienda; sin cambio. El "character-flip" estrella del indicador está inerte por defecto (`close < source` con source=close). Lección: los dashboards de TradingView impresionan porque NO descuentan costes; nuestro backtest con 0.30% lo desenmascara en minutos. Conservada como `evaluateStrategyV6`.
+
+### 2.6 Modelo de Costes (fees + slippage)
+Tanto el backtest (`backtestEngine.js`) como el ledger live (`shadowTrader.js`) aplican costes realistas en cada operación, definidos en `config.js` (`COSTS`):
+*   **Comisión (fee):** 0.10% por lado (taker spot de Binance).
+*   **Slippage:** 0.05% por lado (estimado para altcoins en 15m).
+*   **Round-trip total:** ≈ **0.30%** por operación completa.
+
+Mecánica: en la COMPRA el slippage empeora el precio de llenado y la comisión reduce la cripto recibida; en la VENTA el slippage empeora el precio y la comisión reduce el retorno. Así un trade que entra y sale al mismo precio de mercado pierde exactamente el round-trip. Esto es **imprescindible**: sin costes el backtest sobreestima el edge (un backtest de 12 meses pasó de +8.17% a −7.61% al añadir costes — el signo se invierte).
+
+Para comparar con/sin costes:
+```bash
+node backtest.js --v4c                # con costes (honesto, default)
+node backtest.js --v4c --no-costs     # idealizado (sin fees)
+node backtest.js --v4c --fee=0.075 --slippage=0.03   # costes custom (% por lado)
+```
 
 ---
 
@@ -120,6 +162,13 @@ El proyecto cuenta con un motor de simulación profesional (`backtestEngine.js`)
 | `--atr-trail=N` | `3.0` | Chandelier exit = peak − N × ATR(14). |
 | `--partial-r=N` | `0` (off) | Si >0, vende 50% al alcanzar N × R inicial y mueve el SL a breakeven. |
 
+**Costes de transacción (ver §2.6)**
+| Flag | Default | Descripción |
+|---|---|---|
+| `--fee=N` | `0.1` | Comisión por lado (%). Default desde `config.js`. |
+| `--slippage=N` | `0.05` | Slippage por lado (%). Default desde `config.js`. |
+| `--no-costs` | (off) | Anula fees y slippage → backtest idealizado (para contraste). |
+
 **Salida del reporte**
 | Flag | Default | Descripción |
 |---|---|---|
@@ -167,15 +216,17 @@ El runner imprime un bloque al final con la comparativa **train vs holdout** y e
 
 ## 4. Estructura de Módulos
 
+*   **`config.js`:** ⭐ Configuración CENTRALIZADA (fuente única de verdad): blacklist, parámetros de riesgo (`RISK`), costes (`COSTS`), filtros de régimen (`STRATEGY_OPTS`), universo. Importado por bot/backtest/engine/shadowTrader para paridad total.
 *   **`indicators.js`:** Estrategias y helpers de indicadores.
     *   Estrategias: `evaluateStrategy` (V1), `evaluateStrategyV2`, `evaluateStrategyV3`, `evaluateStrategyV4A` (Supertrend), `evaluateStrategyV4B` (V3 + ATR exits), `evaluateStrategyV4C` (V3 + regime gate — la productiva).
     *   Helpers: `calculateEMA`, `calculateRSI`, `calculateATR`, `calculateSupertrend`, `calculateChoppinessIndex`, `calculateBBW`.
 *   **`backtestEngine.js`:** Motor de simulación. Descarga datos paginada, cronología unificada de eventos por símbolo, dispatcher de estrategia por versión, dos modos de exit (`fixed` y `atr`), división train/holdout y métricas completas.
 *   **`backtest.js`:** Runner de consola. Parsea flags CLI, ejecuta el engine, escribe JSON e inyecta los resultados en el HTML.
 *   **`backtest-report.html`:** Plantilla del reporte visual.
-*   **`bot.js`:** Bot productivo (V4C-COMBO). Importa `evaluateStrategyV4C`, gestiona TP/SL/trailing, llama a `shadowTrader` para persistir posiciones.
-*   **`shadowTrader.js`:** Gestiona el estado en **Netlify Blobs**. Persiste el `peakPrice` y `trailingActivated` para mantener el trailing stop entre ejecuciones serverless.
-*   **`binanceService.js`:** Cliente HTTP de Binance (klines y top por volumen).
+*   **`bot.js`:** Canal 15m (V4C-COMBO). Importa `evaluateStrategyV4C` + `config.js`, descarta la vela en curso, respeta cooldown post-SL, gestiona TP/SL/trailing y persiste vía `shadowTrader` (default).
+*   **`dailyBot.js`:** Canal diario (SMA200 regime-timer). `runDailyBot()` evalúa la señal SMA200 sobre velas diarias cerradas e invierte/sale a cash vía `dailyTrader`. Idempotente intra-día.
+*   **`shadowTrader.js`:** Gestiona el estado en **Netlify Blobs**. `ShadowTrader` parametrizado por `storeKey`/`label` (cada canal su cartera). Exporta el canal 15m (default) y `dailyTrader` (SMA200-1d). Aplica costes (fees+slippage) en buy/sell, persiste `peakPrice`/`trailingActivated`/`cooldowns`, y `getStats(currentPrices)` valora a mercado con P&L realizado/no realizado. Mensajes Telegram etiquetados por canal y con modo régimen (sin TP/SL fijo).
+*   **`binanceService.js`:** Cliente HTTP de Binance (klines, top por volumen, `getPrices` para valorar a mercado).
 *   **`telegramService.js`:** Notificaciones de trades al canal de Telegram.
 *   **`shadow-report.js`:** Genera un HTML auditable con el estado real del bot (descarga el blob y lo renderiza).
 
@@ -207,18 +258,25 @@ Configuradas en el panel de Netlify:
 
 ## 7. Paridad bot ↔ backtest
 
-Todos los parámetros del bot productivo (`bot.js`) coinciden con los defaults del backtest engine para que `npm run backtest` reproduzca exactamente la lógica que está corriendo en Netlify:
+Desde 2026-05-29 **todos los parámetros viven en `config.js`** (fuente única de verdad), importado por `bot.js`, `backtest.js`, `backtestEngine.js` y `shadowTrader.js`. Esto elimina el drift: cambiar un valor en `config.js` se propaga a live y backtest a la vez.
 
-| Parámetro | Valor | Ubicación |
+| Parámetro | Valor (config.js) | Notas de paridad |
 |---|---|---|
-| Estrategia | `evaluateStrategyV4C` | `bot.js`, `backtestEngine.js` (default `'4C'`) |
-| Opts de régimen | `{ chopMax: 50, bbwPctMin: 20 }` | `bot.js: STRATEGY_OPTS`, `backtest.js: regimeOpts` |
-| Trailing distance | `0.45` | `bot.js: TRAIL_DISTANCE`, `backtestEngine.js: trailingDistance` |
-| Stop Loss | `3.0%` | `bot.js: RISK_SL`, `backtestEngine.js: stopLossPct` |
-| Take Profit | `5.0%` | `bot.js: RISK_TP`, `backtestEngine.js: takeProfitPct` |
-| Trailing activation | `1.5%` | `bot.js: TRAIL_ACTIVATION`, `backtestEngine.js: trailingActivation` |
-| Cooldown post-SL | 12 velas (3h) | `backtestEngine.js: cooldownCandles` |
-| Velas mínimas | 125 (de 130 pedidas) | `bot.js`; el engine usa buffer 120 |
-| Blacklist | Stablecoins + TAO/ZEC/PEPE/ADA/INJ/DOGE/BCH | Idéntica en `bot.js`, `backtest.js`, `backtestEngine.js` |
-| Universo | top 10 por volumen, post-blacklist | `bot.js: TOP_COINS_LIMIT`, `backtest.js: --universe` |
-| % balance por trade | 20% | `backtestEngine.js: executeBuy` |
+| Estrategia | `evaluateStrategyV4C` + `STRATEGY_OPTS {chopMax:50, bbwPctMin:20}` | idéntica en live y backtest |
+| Stop Loss / Take Profit | `RISK.stopLossPct 3.0%` / `RISK.takeProfitPct 5.0%` | — |
+| Trailing | activación `1.5%`, distancia `0.45` | — |
+| **Cooldown post-SL** | `RISK.cooldownCandles 12` (3h) | ✅ ahora **también en live** (`shadowTrader.sell` lo fija, `bot.js` lo respeta). Antes solo existía en el backtest. |
+| **Costes** | `COSTS` 0.1% fee + 0.05% slippage / lado | ✅ aplicados en backtest Y en ledger live |
+| % balance por trade | `RISK.positionSizePct 0.20` | — |
+| Blacklist | `BLACKLIST` (stablecoins + TAO/ZEC/PEPE/ADA/INJ/DOGE/BCH) | una sola definición importada en 3 sitios |
+| Universo | top 10 por volumen, post-blacklist | `TOP_COINS_LIMIT` |
+| **Vela en curso** | descartada en live | ✅ `bot.js` pide 131 velas y descarta la última (sin cerrar) → sin repaint, igual que el backtest que solo usa velas cerradas |
+| **Orden de salidas** | TP → Trailing → SL | ✅ alineado en `bot.js` con `applyFixedExits` del backtest |
+
+### 7.1 Bugs corregidos en la auditoría 2026-05-29
+*   **Cooldown ausente en live** → portado a `shadowTrader`/`bot.js` (timestamp-based, robusto al cron).
+*   **Repaint de vela en curso** → `bot.js` descarta la vela sin cerrar.
+*   **`getStats` valoraba a coste** → ahora valora a mercado y separa P&L realizado / no realizado (`/status` de Telegram lo muestra).
+*   **Mensaje Telegram con datos obsoletos** (SL −2.5%, "V3", trail 1.0%) → ahora lee de `config.js` (SL real, "V4C-COMBO", trail 1.5%).
+*   **Backtest sin costes** → modelo de fees+slippage en motor y ledger (§2.6).
+*   **Blacklist/params triplicados** → centralizados en `config.js`.

@@ -2,12 +2,7 @@ import fs from 'fs';
 import BacktestEngine from './backtestEngine.js';
 import binance from './binanceService.js';
 import { exec } from 'child_process';
-
-// Blacklist centralizada (igual que bot.js — BCH añadido tras backtest V4C-COMBO)
-const BLACKLIST = [
-  'LUNC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'EUR', 'GBP', 'BUSD', 'USDP', 'USTC', 'TST',
-  'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE', 'BCH'
-];
+import { BLACKLIST, STRATEGY_OPTS, COSTS } from './config.js';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -22,12 +17,22 @@ async function main() {
   else if (args.includes('--v4a')) strategyVersion = '4A';
   else if (args.includes('--v4b')) strategyVersion = '4B';
   else if (args.includes('--v4c')) strategyVersion = '4C';
+  else if (args.includes('--sma200')) strategyVersion = 'SMA200';
+  else if (args.includes('--stday')) strategyVersion = 'STDAY';
+  else if (args.includes('--donchian')) strategyVersion = 'DONCHIAN';
 
-  // Exit mode auto: V4-A y V4-B usan ATR por defecto, el resto usa fixed
+  // Familia diaria (baja frecuencia): salida por señal, no TP/SL
+  const isDaily = ['SMA200', 'STDAY', 'DONCHIAN'].includes(strategyVersion);
+
+  // Timeframe: --interval=, o 1d automático para la familia diaria, o 15m por defecto
+  const intervalArg = args.find(a => a.startsWith('--interval='));
+  const interval = intervalArg ? intervalArg.split('=')[1] : (isDaily ? '1d' : '15m');
+
+  // Exit mode auto: familia diaria=signal; V4-A/B=atr; resto=fixed
   const exitModeArg = args.find(a => a.startsWith('--exit-mode='));
   const exitMode = exitModeArg
     ? exitModeArg.split('=')[1]
-    : (strategyVersion === '4A' || strategyVersion === '4B' ? 'atr' : 'fixed');
+    : (isDaily ? 'signal' : (strategyVersion === '4A' || strategyVersion === '4B' ? 'atr' : 'fixed'));
 
   const atrSLArg = args.find(a => a.startsWith('--atr-sl='));
   const atrTrailArg = args.find(a => a.startsWith('--atr-trail='));
@@ -38,6 +43,9 @@ async function main() {
   const trailActArg = args.find(a => a.startsWith('--trail-act='));
   const slArg = args.find(a => a.startsWith('--sl='));
   const tpArg = args.find(a => a.startsWith('--tp='));
+  const feeArg = args.find(a => a.startsWith('--fee='));         // % por lado (ej: 0.1)
+  const slipArg = args.find(a => a.startsWith('--slippage='));   // % por lado (ej: 0.05)
+  const noCosts = args.includes('--no-costs');                   // backtest idealizado (sin fees)
 
   const months = monthsArg ? parseInt(monthsArg.split('=')[1]) : 3;
   const initialBalance = balanceArg ? parseFloat(balanceArg.split('=')[1]) : 5000;
@@ -72,30 +80,54 @@ async function main() {
   console.log(`🪙 Símbolos: ${symbols.join(', ')}`);
   const stratNames = {
     1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)',
-    '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)'
+    '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)',
+    'SMA200': 'SMA200 (Faber regime, diaria)', 'STDAY': 'SuperTrend diario', 'DONCHIAN': 'Donchian 55/20 (diaria)'
   };
   console.log(`📋 Estrategia: ${stratNames[strategyVersion]}`);
+  console.log(`⏱️  Timeframe: ${interval}`);
   console.log(`🚪 Exit mode: ${exitMode}`);
   console.log('--------------------------------------------------------');
 
-  // Defaults V4C-COMBO (paridad bot.js): chop<50, BBW pct>20
-  const regimeOpts = { chopMax: 50, bbwPctMin: 20 };
+  // Defaults V4C-COMBO centralizados en config.js (paridad bot.js)
+  const regimeOpts = { ...STRATEGY_OPTS };
   if (chopArg) regimeOpts.chopMax = parseFloat(chopArg.split('=')[1]);
   if (bbwArg) regimeOpts.bbwPctMin = parseFloat(bbwArg.split('=')[1]);
+
+  // Parámetros de la familia diaria
+  const regimeArg = args.find(a => a.startsWith('--regime='));   // on/off del gate SMA200
+  const smaArg = args.find(a => a.startsWith('--sma='));
+  const entryLenArg = args.find(a => a.startsWith('--entry-len='));
+  const exitLenArg = args.find(a => a.startsWith('--exit-len='));
+  const stMultArg = args.find(a => a.startsWith('--st-mult='));
+  const stPeriodArg = args.find(a => a.startsWith('--st-period='));
+  if (regimeArg) regimeOpts.useRegime = regimeArg.split('=')[1] !== 'off';
+  if (smaArg) regimeOpts.smaPeriod = parseInt(smaArg.split('=')[1]);
+  if (entryLenArg) regimeOpts.entryLen = parseInt(entryLenArg.split('=')[1]);
+  if (exitLenArg) regimeOpts.exitLen = parseInt(exitLenArg.split('=')[1]);
+  if (stMultArg) regimeOpts.stMult = parseFloat(stMultArg.split('=')[1]);
+  if (stPeriodArg) regimeOpts.stPeriod = parseInt(stPeriodArg.split('=')[1]);
+
+  // Costes: por defecto los de config.js; --no-costs los anula; --fee/--slippage los sobreescriben
+  const feePct = noCosts ? 0 : (feeArg ? parseFloat(feeArg.split('=')[1]) / 100 : COSTS.feePct);
+  const slippagePct = noCosts ? 0 : (slipArg ? parseFloat(slipArg.split('=')[1]) / 100 : COSTS.slippagePct);
 
   const engineOpts = {
     initialBalance,
     symbols,
     months,
-    interval: '15m',
+    interval,
     strategyVersion,
     oosSplitRatio,
     exitMode,
     atrSLMult: atrSLArg ? parseFloat(atrSLArg.split('=')[1]) : 2.0,
     atrTrailMult: atrTrailArg ? parseFloat(atrTrailArg.split('=')[1]) : 3.0,
     partialExitAtR: partialArg ? parseFloat(partialArg.split('=')[1]) : 0,
-    regimeOpts
+    regimeOpts,
+    feePct,
+    slippagePct
   };
+  // La familia diaria necesita ventana grande (SMA200 / canal 55) → buffer > 220
+  if (isDaily) { engineOpts.bufferSize = 260; engineOpts.minCandles = 210; }
   if (trailDistArg) engineOpts.trailingDistance = parseFloat(trailDistArg.split('=')[1]);
   if (trailActArg) engineOpts.trailingActivation = parseFloat(trailActArg.split('=')[1]);
   if (slArg) engineOpts.stopLossPct = parseFloat(slArg.split('=')[1]);
@@ -132,6 +164,15 @@ async function main() {
     console.log(`  Win Rate:         ${s.winRate}%`);
     console.log(`  Profit Factor:    ${s.profitFactor}`);
     console.log(`  Max Drawdown:     -${s.maxDrawdown}%`);
+    if (s.buyHold) {
+      const bh = s.buyHold;
+      const beatRoi = s.roi >= bh.roi;
+      const beatDD = s.maxDrawdown <= bh.maxDrawdown;
+      console.log('  ┌─ vs BUY & HOLD (equiponderado) ─────────────');
+      console.log(`  │ HODL ROI:        ${bh.roi >= 0 ? '+' : ''}${bh.roi}%   (estrategia ${beatRoi ? '✅ ≥' : '🔻 <'} HODL)`);
+      console.log(`  │ HODL Max DD:     -${bh.maxDrawdown}%   (estrategia ${beatDD ? '✅ menor DD' : '🔻 peor DD'})`);
+      console.log('  └──────────────────────────────────────────────');
+    }
     console.log(`  Expectancy:       ${s.expectancy >= 0 ? '+' : ''}${s.expectancy} USDC/trade`);
     console.log(`  Trades Totales:   ${s.totalTrades} (${s.winningTrades}W / ${s.losingTrades}L)`);
     console.log(`  Duración Media:   ${s.avgDurationHours}h`);
