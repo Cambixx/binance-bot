@@ -9,7 +9,7 @@
     "walkforward": "node walkforward.js",
     "validate": "node validate.js",
     "sync": "npx netlify blobs:get shadow_trading_state bot_state_v2 --output shadow_trades_sync.json",
-    "reset": "npx netlify blobs:delete shadow_trading_state bot_state_v2",
+    "reset": "npx netlify blobs:delete shadow_trading_state bot_state_v2 ; npx netlify blobs:delete shadow_trading_state bot_state_daily_v1 ; npx netlify blobs:delete shadow_trading_state bot_state_rotation_v1",
     "clear-blobs": "npm run reset",
     "backtest": "node backtest.js",
     "shadow-report": "node shadow-report.js"
