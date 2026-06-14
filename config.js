@@ -20,6 +20,10 @@ export function isBlacklisted(symbol) {
 // ─────────────────────────── Estrategia ───────────────────────────
 export const INTERVAL = '15m';
 export const TOP_COINS_LIMIT = 10;
+// Ventana de velas CERRADAS que ve la estrategia 15m. Fuente única para garantizar
+// paridad EXACTA del último valor de EMA/ADX/MFI/CHOP entre live y backtest (auditoría #10:
+// los indicadores recursivos dependen de cuántas velas se les pasan).
+export const LOOKBACK_15M = 130;
 // Filtros de régimen V4-C: CHOP < chopMax (tendencia clara), BBW percentil > bbwPctMin (vol viva)
 export const STRATEGY_OPTS = { chopMax: 50, bbwPctMin: 20 };
 
@@ -31,7 +35,16 @@ export const RISK = {
   trailingDistance: 0.45,    // Fracción del peak protegida (0.45 = trail al 45% del beneficio máximo)
   cooldownCandles: 12,       // Velas (12 × 15m = 3h) de bloqueo tras un STOP_LOSS
   positionSizePct: 0.20,     // % del cash invertido por operación
+  // Caps de cartera (auditoría #26). null = sin límite (preserva el comportamiento histórico).
+  // Se aplican en el motor de backtest Y en el bot live para paridad.
+  maxConcurrentPositions: null, // nº máximo de posiciones abiertas simultáneas
+  maxExposurePct: null,         // fracción máxima del equity invertida a la vez (0..1)
 };
+
+// ─────────────────────────── Banda de histéresis (familia diaria) ───────────────────────────
+// Evita whipsaw en torno a la SMA (auditoría #11): solo entra si close > sma*(1+band)
+// y solo sale a cash si close < sma*(1-band). 0 = sin banda (comportamiento histórico).
+export const SMA_HYSTERESIS_BAND = 0.0;
 
 // ─────────────────────────── Costes de transacción ───────────────────────────
 // Modelo realista: comisión taker de Binance + slippage estimado, aplicados por LADO.
@@ -40,6 +53,41 @@ export const RISK = {
 export const COSTS = {
   feePct: 0.001,        // 0.10% por lado (comisión taker Binance spot)
   slippagePct: 0.0005,  // 0.05% por lado (slippage estimado en 15m altcoins)
+};
+
+// ─────────────────────────── Vol-targeting (sizing dinámico) ───────────────────────────
+// Escala el tamaño de posición por volatilidad realizada (investigación §2.1, evidencia alta):
+// w = clamp(targetVol / realizedVol, 0, wMax). EWMA RiskMetrics (λ=0.94), anualizado √365 (24/7).
+// Banda de no-trade (τ) para no re-balancear por ruido y gastar costes. enabled=false preserva
+// el sizing fijo histórico (positionSizePct); se activa por canal.
+export const VOLTARGET = {
+  enabled: false,
+  targetVolAnnual: 0.50,  // ~50% anualizado por sleeve de una sola moneda
+  lambda: 0.94,           // decaimiento EWMA (estándar RiskMetrics diario)
+  wMax: 1.0,              // spot long-only: sin apalancamiento
+  band: 0.15,             // τ: solo re-balancea si |w - wActual| > band
+  minWeight: 0.0,         // por debajo de esto, queda en cash
+};
+
+// ─────────────────────────── Filtro maestro de régimen BTC ───────────────────────────
+// Interruptor global risk-on/off (investigación §2.2): si BTC < SMA(period), no se abren
+// nuevas posiciones en NINGÚN canal. Barato y de alto impacto (BTC cruza su SMA pocas veces/año).
+export const REGIME = {
+  btcEnabled: false,       // activar el gate maestro BTC
+  btcSymbol: 'BTCUSDC',
+  btcSmaPeriod: 200,       // SMA diaria de BTC para el switch
+};
+
+// ─────────────────────────── Rotación cross-sectional + dual-momentum ───────────────────────────
+// Canal nuevo (investigación P3+P4): rankea majors por retorno trailing y mantiene top-N,
+// con gate de momentum absoluto + gate BTC; si no, cash. Lookback en banda 15-35d (el momentum
+// cripto se invierte pasado ~1 mes). Rebalanceo poco frecuente para sobrevivir a costes.
+export const ROTATION = {
+  lookbackDays: 30,        // retorno trailing para el ranking (banda 15-35)
+  topN: 5,                 // nº de monedas mantenidas, equiponderadas
+  absMomLookback: 30,      // gate de momentum absoluto propio (>0)
+  rebalanceDays: 14,       // cadencia bi-semanal (no semanal agresivo)
+  useBtcRegime: true,      // exigir BTC risk-on para mantener cualquier posición
 };
 
 // ─────────────────────────── Capital ───────────────────────────

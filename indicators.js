@@ -277,7 +277,10 @@ export function calculateSupertrend(highs, lows, closes, period = 10, multiplier
 
     let trend;
     if (i === 0) {
-      trend = close > upperBasic ? 1 : -1;
+      // Seed canónico nz(trend,1) = +1 (fix #22): el SuperTrend de TradingView arranca en
+      // alcista y deja que el cruce de bandas tome el control. Sembrar con close>upperBasic
+      // daba casi siempre -1 (upperBasic ≫ close) → downtrend espurio + flip-up extra en warmup.
+      trend = 1;
     } else if (prevSupertrend === prevFinalUpper && close <= finalUpper) {
       trend = -1;
     } else if (prevSupertrend === prevFinalUpper && close > finalUpper) {
@@ -456,12 +459,17 @@ export function evaluateStrategyV4B(candles) {
 /**
  * V3 entries idénticas + dos filtros adicionales para evitar mercados
  * incompatibles:
- *  - CHOP(14) < 45 → mercado en tendencia clara
- *  - BBW(20) en percentil > 30 del rolling 100 → hay vol suficiente
+ *  - CHOP(14) < chopMax → mercado en tendencia clara
+ *  - BBW(20) en percentil > bbwPctMin del rolling 100 → hay vol suficiente
+ *
+ * Defaults alineados con config.js STRATEGY_OPTS (chopMax 50, bbwPctMin 20) — fix #24:
+ * antes los defaults (45/30) divergían de la config productiva y el docstring estaba obsoleto.
+ * En producción los valores SIEMPRE vienen de config.js; estos defaults solo aplican si se
+ * llama sin opts (p.ej. en tests).
  */
 export function evaluateStrategyV4C(candles, opts = {}) {
-  const chopMax = opts.chopMax ?? 45;
-  const bbwPctMin = opts.bbwPctMin ?? 30;
+  const chopMax = opts.chopMax ?? 50;
+  const bbwPctMin = opts.bbwPctMin ?? 20;
   const { closes, highs, lows, volumes } = candles;
   if (closes.length < 120) return 'HOLD';
 
@@ -485,10 +493,11 @@ export function evaluateStrategyV4C(candles, opts = {}) {
   const mfiNow = mfiValues[mfiValues.length - 1];
   const chopNow = chop[chop.length - 1];
 
-  // Rolling percentile rank de BBW sobre últimas 100 velas
+  // Rolling percentile rank de BBW sobre últimas 100 velas. Rankea contra el HISTORIAL
+  // (excluye el valor actual, fix #23) para no auto-inflar el percentil en ~100/W puntos.
   const bbwWindow = bbw.slice(-100);
   const bbwNow = bbwWindow[bbwWindow.length - 1];
-  const bbwPctRank = percentileRank(bbwWindow, bbwNow);
+  const bbwPctRank = percentileRank(bbwWindow.slice(0, -1), bbwNow);
 
   const fastNow = emaFast[emaFast.length - 1];
   const fastPrev = emaFast[emaFast.length - 2];
@@ -757,12 +766,16 @@ function smaLast(closes, period) {
  */
 export function evaluateStrategySMA200(candles, opts = {}) {
   const period = opts.smaPeriod ?? 200;
+  // Banda de histéresis (fix #11 / investigación P2): solo entra si close > sma*(1+band)
+  // y solo sale si close < sma*(1-band). band=0 → comportamiento histórico. Reduce el
+  // whipsaw (cada round-trip in/out paga ~0.30%) cuando el cierre orbita la SMA.
+  const band = opts.band ?? 0;
   const { closes } = candles;
   if (closes.length < period + 1) return 'HOLD';
   const sma = smaLast(closes, period);
   const price = closes[closes.length - 1];
-  if (price > sma) return 'BUY';
-  if (price < sma) return 'SELL';
+  if (price > sma * (1 + band)) return 'BUY';
+  if (price < sma * (1 - band)) return 'SELL';
   return 'HOLD';
 }
 
@@ -824,4 +837,125 @@ export function evaluateStrategyDonchian(candles, opts = {}) {
   if (price > maxC && regimeOK) return 'BUY';
   if (price < minC) return 'SELL';
   return 'HOLD';
+}
+
+// ============================================================
+//  PRIMITIVAS DE CARTERA — vol-targeting, régimen BTC, rotación (investigación §2 + P3/P4)
+// ============================================================
+
+/** Periodos por año según el timeframe (cripto 24/7). Para anualizar vol/Sharpe. */
+export function periodsPerYearFor(interval = '1d') {
+  const map = {
+    '1m': 365 * 24 * 60, '5m': 365 * 24 * 12, '15m': 365 * 24 * 4,
+    '30m': 365 * 24 * 2, '1h': 365 * 24, '2h': 365 * 12, '4h': 365 * 6,
+    '6h': 365 * 4, '12h': 365 * 2, '1d': 365, '3d': Math.round(365 / 3),
+    '1w': 52,
+  };
+  return map[interval] || 365;
+}
+
+/**
+ * Peso de vol-targeting (investigación §2.1, evidencia alta): w = clamp(targetVol/realizedVol, 0, wMax).
+ * realizedVol = vol EWMA (RiskMetrics, λ=0.94) de retornos log, anualizada. En régimen tranquilo
+ * w→wMax (invierte el tamaño base completo); en régimen volátil w→0 (recorta tamaño).
+ * Spot long-only: wMax=1 (sin apalancamiento).
+ *
+ * @param {Array<number>} closes  cierres (timeframe del canal)
+ * @param {object} opts { targetVolAnnual, lambda=0.94, wMax=1, periodsPerYear, minWeight=0 }
+ * @returns {number} peso en [0, wMax]
+ */
+export function computeVolTargetWeight(closes, opts = {}) {
+  const targetVolAnnual = opts.targetVolAnnual ?? 0.5;
+  const lambda = opts.lambda ?? 0.94;
+  const wMax = opts.wMax ?? 1.0;
+  const periodsPerYear = opts.periodsPerYear ?? 365;
+  if (!closes || closes.length < 20) return wMax; // sin datos suficientes, no recortar
+
+  // Retornos log
+  const rets = [];
+  for (let i = 1; i < closes.length; i++) {
+    if (closes[i - 1] > 0 && closes[i] > 0) rets.push(Math.log(closes[i] / closes[i - 1]));
+  }
+  if (rets.length < 5) return wMax;
+
+  // Varianza EWMA: var_t = λ·var_{t-1} + (1-λ)·r_t². Semilla = varianza simple inicial.
+  const seedWin = Math.min(20, rets.length);
+  let mean0 = 0;
+  for (let i = 0; i < seedWin; i++) mean0 += rets[i];
+  mean0 /= seedWin;
+  let varEwma = 0;
+  for (let i = 0; i < seedWin; i++) varEwma += (rets[i] - mean0) ** 2;
+  varEwma /= seedWin;
+  for (let i = seedWin; i < rets.length; i++) {
+    varEwma = lambda * varEwma + (1 - lambda) * rets[i] * rets[i];
+  }
+  const realizedVolAnnual = Math.sqrt(varEwma * periodsPerYear);
+  if (!isFinite(realizedVolAnnual) || realizedVolAnnual <= 0) return wMax;
+
+  let w = targetVolAnnual / realizedVolAnnual;
+  if (w > wMax) w = wMax;
+  if (w < 0) w = 0;
+  if (w < (opts.minWeight ?? 0)) w = 0;
+  return w;
+}
+
+/** Retorno trailing simple sobre los últimos `lookback` cierres (close[-1]/close[-1-lookback] - 1). */
+export function trailingReturn(closes, lookback) {
+  const n = closes.length;
+  if (n < lookback + 1) return null;
+  const a = closes[n - 1 - lookback];
+  const b = closes[n - 1];
+  if (!(a > 0)) return null;
+  return b / a - 1;
+}
+
+/**
+ * Filtro maestro de régimen BTC (investigación §2.2): risk-on si el último cierre de BTC
+ * está por encima de su SMA(period). Un interruptor global barato y de alto impacto.
+ */
+export function btcRegimeOn(btcCloses, smaPeriod = 200) {
+  if (!btcCloses || btcCloses.length < smaPeriod + 1) return true; // sin datos → no bloquear
+  const sma = smaLast(btcCloses, smaPeriod);
+  return btcCloses[btcCloses.length - 1] > sma;
+}
+
+/**
+ * Rotación cross-sectional + dual-momentum (investigación P3+P4). Devuelve el set de símbolos
+ * objetivo a mantener (equiponderados). Pasos:
+ *  1) Relativo: rankea por retorno trailing `lookbackDays` y toma top-N.
+ *  2) Gate absoluto: solo conserva los que tienen momentum propio > 0 (sobre `absMomLookback`).
+ *  3) Gate BTC: si BTC risk-off, devuelve set vacío (todo a cash).
+ * El edge robusto viene de los gates (cash en bajista), no del ranking relativo.
+ *
+ * @param {Object<string, Array<number>>} closesBySymbol  cierres diarios por símbolo
+ * @param {object} opts { lookbackDays, topN, absMomLookback, btcCloses, useBtcRegime, btcSmaPeriod }
+ * @returns {{ targets: string[], ranked: Array<{symbol,ret}>, riskOff: boolean }}
+ */
+export function computeRotationTargets(closesBySymbol, opts = {}) {
+  const lookbackDays = opts.lookbackDays ?? 30;
+  const topN = opts.topN ?? 5;
+  const absMomLookback = opts.absMomLookback ?? 30;
+  const useBtcRegime = opts.useBtcRegime ?? true;
+  const btcSmaPeriod = opts.btcSmaPeriod ?? 200;
+
+  // Gate maestro BTC
+  if (useBtcRegime && opts.btcCloses && !btcRegimeOn(opts.btcCloses, btcSmaPeriod)) {
+    return { targets: [], ranked: [], riskOff: true };
+  }
+
+  const ranked = [];
+  for (const sym in closesBySymbol) {
+    const ret = trailingReturn(closesBySymbol[sym], lookbackDays);
+    if (ret != null) ranked.push({ symbol: sym, ret });
+  }
+  ranked.sort((a, b) => b.ret - a.ret);
+
+  // Top-N relativo + gate de momentum absoluto propio
+  const targets = [];
+  for (const r of ranked) {
+    if (targets.length >= topN) break;
+    const absMom = trailingReturn(closesBySymbol[r.symbol], absMomLookback);
+    if (absMom != null && absMom > 0) targets.push(r.symbol);
+  }
+  return { targets, ranked, riskOff: false };
 }

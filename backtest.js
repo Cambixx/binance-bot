@@ -1,8 +1,8 @@
 import fs from 'fs';
-import BacktestEngine from './backtestEngine.js';
+import BacktestEngine, { strategyName } from './backtestEngine.js';
 import binance from './binanceService.js';
 import { exec } from 'child_process';
-import { BLACKLIST, STRATEGY_OPTS, COSTS } from './config.js';
+import { BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET } from './config.js';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -52,23 +52,29 @@ async function main() {
   const oosArg = args.find(a => a.startsWith('--oos-split='));
   const oosSplitRatio = oosArg ? parseFloat(oosArg.split('=')[1]) : 0.7;
   const universeArg = args.find(a => a.startsWith('--universe='));
-  // Universo por defecto = 10, coincide con TOP_COINS_LIMIT en bot.js (paridad live)
-  const universeSize = universeArg ? parseInt(universeArg.split('=')[1]) : 10;
 
-  let symbols = ['BTCUSDC', 'ETHUSDC', 'SOLUSDC', 'BNBUSDC', 'XRPUSDC'];
+  // Cesta FIJA de large-caps con histórico largo: universo por defecto del backtest (fix #16).
+  // El top-N dinámico de Binance (lo que usa el bot LIVE) está condicionado al volumen de HOY,
+  // así que aplicarlo al pasado mete sesgo de supervivencia/selección → backtest optimista.
+  // Para auditar el sesgo, opta explícitamente con --universe=N (queda etiquetado abajo).
+  const DEFAULT_BASKET = ['BTCUSDC', 'ETHUSDC', 'SOLUSDC', 'XRPUSDC', 'LINKUSDC', 'AVAXUSDC', 'DOTUSDC', 'LTCUSDC'];
+  let symbols = DEFAULT_BASKET;
+  let universeNote = 'cesta fija large-caps (sin sesgo de supervivencia)';
 
   if (symbolsArg) {
     symbols = symbolsArg.split('=')[1].split(',');
-  } else {
+    universeNote = 'símbolos explícitos';
+  } else if (universeArg) {
+    const universeSize = parseInt(universeArg.split('=')[1]);
     try {
-      console.log(`🔍 Obteniendo top ${universeSize} monedas por volumen (paridad con bot.js)...`);
-      // Pedimos universeSize + 5 para tener colchón tras filtrar blacklist (igual que bot.js)
+      console.log(`🔍 Top ${universeSize} por volumen (⚠️ top dinámico = sesgo de supervivencia en backtest)...`);
       const topSymbols = await binance.getTopVolumeSymbols(universeSize + 5);
       if (topSymbols && topSymbols.length > 0) {
         symbols = topSymbols.filter(s => !BLACKLIST.some(bad => s.includes(bad))).slice(0, universeSize);
+        universeNote = `⚠️ top-${universeSize} dinámico de HOY (sesgo de supervivencia)`;
       }
     } catch (e) {
-      console.log('⚠️ No se pudo obtener el top de Binance, usando defaults.');
+      console.log('⚠️ No se pudo obtener el top de Binance, usando la cesta fija.');
     }
   }
 
@@ -78,12 +84,8 @@ async function main() {
   console.log(`📅 Periodo: ${months} meses`);
   console.log(`💰 Balance Inicial: ${initialBalance} USDC`);
   console.log(`🪙 Símbolos: ${symbols.join(', ')}`);
-  const stratNames = {
-    1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)',
-    '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)',
-    'SMA200': 'SMA200 (Faber regime, diaria)', 'STDAY': 'SuperTrend diario', 'DONCHIAN': 'Donchian 55/20 (diaria)'
-  };
-  console.log(`📋 Estrategia: ${stratNames[strategyVersion]}`);
+  console.log(`🌐 Universo: ${universeNote}`);
+  console.log(`📋 Estrategia: ${strategyName(strategyVersion)}`);
   console.log(`⏱️  Timeframe: ${interval}`);
   console.log(`🚪 Exit mode: ${exitMode}`);
   console.log('--------------------------------------------------------');
@@ -102,6 +104,11 @@ async function main() {
   const stPeriodArg = args.find(a => a.startsWith('--st-period='));
   if (regimeArg) regimeOpts.useRegime = regimeArg.split('=')[1] !== 'off';
   if (smaArg) regimeOpts.smaPeriod = parseInt(smaArg.split('=')[1]);
+  // Banda de histéresis para SMA200 (paridad con el bot live). --band en % (ej: --band=1).
+  const bandArg = args.find(a => a.startsWith('--band='));
+  if (strategyVersion === 'SMA200') {
+    regimeOpts.band = bandArg ? parseFloat(bandArg.split('=')[1]) / 100 : SMA_HYSTERESIS_BAND;
+  }
   if (entryLenArg) regimeOpts.entryLen = parseInt(entryLenArg.split('=')[1]);
   if (exitLenArg) regimeOpts.exitLen = parseInt(exitLenArg.split('=')[1]);
   if (stMultArg) regimeOpts.stMult = parseFloat(stMultArg.split('=')[1]);
@@ -128,6 +135,8 @@ async function main() {
   };
   // La familia diaria necesita ventana grande (SMA200 / canal 55) → buffer > 220
   if (isDaily) { engineOpts.bufferSize = 260; engineOpts.minCandles = 210; }
+  // Vol-targeting opcional (--voltarget activa el sizing dinámico de config.VOLTARGET)
+  if (args.includes('--voltarget')) engineOpts.volTarget = { ...VOLTARGET, enabled: true };
   if (trailDistArg) engineOpts.trailingDistance = parseFloat(trailDistArg.split('=')[1]);
   if (trailActArg) engineOpts.trailingActivation = parseFloat(trailActArg.split('=')[1]);
   if (slArg) engineOpts.stopLossPct = parseFloat(slArg.split('=')[1]);
@@ -158,19 +167,25 @@ async function main() {
     console.log('\n════════════════════════════════════════════════════════');
     console.log('                   📊 RESULTADOS                       ');
     console.log('════════════════════════════════════════════════════════');
+    const pf = (v) => v == null ? '∞' : v;
     console.log(`  ROI:              ${roiColor}${s.roi >= 0 ? '+' : ''}${s.roi}%${reset}`);
     console.log(`  Profit Neto:      ${roiColor}${s.totalProfit >= 0 ? '+' : ''}${s.totalProfit} USDC${reset}`);
     console.log(`  Balance Final:    ${s.finalBalance} USDC`);
     console.log(`  Win Rate:         ${s.winRate}%`);
-    console.log(`  Profit Factor:    ${s.profitFactor}`);
+    console.log(`  Profit Factor:    ${pf(s.profitFactor)}`);
     console.log(`  Max Drawdown:     -${s.maxDrawdown}%`);
+    console.log(`  Sharpe / Sortino: ${s.sharpe} / ${s.sortino}   (anualizado)`);
+    console.log(`  Calmar:           ${s.calmar}   (retorno anual ${s.annReturn}% / vol ${s.annVol}%)`);
     if (s.buyHold) {
       const bh = s.buyHold;
       const beatRoi = s.roi >= bh.roi;
       const beatDD = s.maxDrawdown <= bh.maxDrawdown;
-      console.log('  ┌─ vs BUY & HOLD (equiponderado) ─────────────');
+      console.log('  ┌─ vs BUY & HOLD (equiponderado, mismo periodo) ─');
       console.log(`  │ HODL ROI:        ${bh.roi >= 0 ? '+' : ''}${bh.roi}%   (estrategia ${beatRoi ? '✅ ≥' : '🔻 <'} HODL)`);
       console.log(`  │ HODL Max DD:     -${bh.maxDrawdown}%   (estrategia ${beatDD ? '✅ menor DD' : '🔻 peor DD'})`);
+      if (s.btcHold) {
+        console.log(`  │ BTC HODL ROI:    ${s.btcHold.roi >= 0 ? '+' : ''}${s.btcHold.roi}%   (DD -${s.btcHold.maxDrawdown}%)`);
+      }
       console.log('  └──────────────────────────────────────────────');
     }
     console.log(`  Expectancy:       ${s.expectancy >= 0 ? '+' : ''}${s.expectancy} USDC/trade`);
@@ -207,10 +222,14 @@ async function main() {
       console.log('\n══════════ 🧪 VALIDACIÓN OUT-OF-SAMPLE ══════════════════');
       console.log(`Split: ${(engine.oosSplitRatio*100).toFixed(0)}% train / ${((1-engine.oosSplitRatio)*100).toFixed(0)}% holdout (corte: ${splitDate})\n`);
       const row = (label, a, b, lowerIsBetter = false) => console.log(`  ${label.padEnd(18)} train=${String(a).padEnd(10)} holdout=${String(b).padEnd(10)} Δ=${arrow(a, b, lowerIsBetter)}`);
+      // PF null = sin pérdidas (∞). Para comparaciones numéricas lo tratamos como un valor alto.
+      const pfNum = (v) => v == null ? 999 : v;
+      const pfStr = (v) => v == null ? '∞' : v;
       row('Trades', tr.totalTrades, ho.totalTrades);
       row('Win Rate %', tr.winRate, ho.winRate);
-      row('Profit Factor', tr.profitFactor, ho.profitFactor);
+      row('Profit Factor', pfStr(tr.profitFactor), pfStr(ho.profitFactor));
       row('ROI %', tr.roi, ho.roi);
+      row('Sharpe', tr.sharpe, ho.sharpe);
       row('Max Drawdown %', tr.maxDrawdown, ho.maxDrawdown, true);
       row('Expectancy', tr.expectancy, ho.expectancy);
 
@@ -218,8 +237,8 @@ async function main() {
       console.log('\n  Veredicto OOS:');
       const verdicts = [];
       const degraded = (a, b, threshPct) => a !== 0 && ((a - b) / Math.abs(a)) * 100 > threshPct;
-      if (tr.profitFactor < 1 || ho.profitFactor < 1) verdicts.push('🔴 PF<1 en alguna fase → no rentable');
-      if (degraded(tr.profitFactor, ho.profitFactor, 25)) verdicts.push('🟡 PF cae >25% en holdout → posible overfit');
+      if (pfNum(tr.profitFactor) < 1 || pfNum(ho.profitFactor) < 1) verdicts.push('🔴 PF<1 en alguna fase → no rentable');
+      if (degraded(pfNum(tr.profitFactor), pfNum(ho.profitFactor), 25)) verdicts.push('🟡 PF cae >25% en holdout → posible overfit');
       if (degraded(tr.winRate, ho.winRate, 15)) verdicts.push('🟡 WR cae >15pp relativo en holdout');
       if (ho.maxDrawdown > tr.maxDrawdown * 1.5 && ho.maxDrawdown > 5) verdicts.push('🟡 MaxDD holdout 50%+ peor que train');
       if (verdicts.length === 0) verdicts.push('✅ Estrategia robusta: métricas consistentes train ↔ holdout');

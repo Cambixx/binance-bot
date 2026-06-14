@@ -4,11 +4,25 @@ import {
   evaluateStrategyV4A, evaluateStrategyV4B, evaluateStrategyV4C,
   evaluateStrategyV5, evaluateStrategyV6,
   evaluateStrategySMA200, evaluateStrategySupertrendDaily, evaluateStrategyDonchian,
-  calculateATR
+  calculateATR, computeVolTargetWeight, periodsPerYearFor
 } from './indicators.js';
-import { BLACKLIST, RISK, COSTS } from './config.js';
+import { evaluateFixedExit } from './exits.js';
+import { BLACKLIST, RISK, COSTS, LOOKBACK_15M } from './config.js';
 
 const BINANCE_API_BASE = 'https://data-api.binance.vision/api/v3';
+
+// Mapa único de nombres de estrategia (fix auditoría #25: antes había dos mapas locales
+// desincronizados y generateReport etiquetaba TODO como "V3").
+export const STRATEGY_NAMES = {
+  1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)',
+  '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)',
+  '5': 'V5 (Trend-rider)', '6': 'V6 (Adaptive SuperTrend)',
+  'SMA200': 'SMA200 (Faber regime, diaria)', 'STDAY': 'SuperTrend diario', 'DONCHIAN': 'Donchian 55/20 (diaria)',
+};
+
+export function strategyName(v) {
+  return STRATEGY_NAMES[v] || STRATEGY_NAMES[String(v)] || `Estrategia ${v}`;
+}
 
 class BacktestEngine {
   constructor(options = {}) {
@@ -25,6 +39,9 @@ class BacktestEngine {
     this.trailingDistance = options.trailingDistance ?? RISK.trailingDistance;
     this.cooldownCandles = options.cooldownCandles ?? RISK.cooldownCandles;
     this.positionSizePct = options.positionSizePct ?? RISK.positionSizePct;
+    // Caps de cartera (fix #26). null = sin límite (preserva comportamiento histórico).
+    this.maxConcurrentPositions = options.maxConcurrentPositions ?? RISK.maxConcurrentPositions ?? null;
+    this.maxExposurePct = options.maxExposurePct ?? RISK.maxExposurePct ?? null;
 
     // Costes de transacción (fees + slippage) — netados en cada trade. Ver config.js / auditoría.
     this.feePct = options.feePct ?? COSTS.feePct;
@@ -40,12 +57,17 @@ class BacktestEngine {
     // Regime-gate params (V4-C)
     this.regimeOpts = options.regimeOpts || {};
 
+    // Vol-targeting (sizing dinámico). null/disabled = sizing fijo histórico (investigación §2.1).
+    this.volTarget = options.volTarget || null;
+
     // Datos pre-descargados (sweep.js reutiliza una sola descarga entre combos)
     this.dataBySymbol = options.dataBySymbol || null;
 
-    // Buffer/warmup configurables (V5 usa EMA200 → necesita ventana mayor)
-    this.bufferSize = options.bufferSize ?? 120;
-    this.minCandles = options.minCandles ?? 105;
+    // Buffer/warmup configurables (V5 usa EMA200 → necesita ventana mayor).
+    // Default alineado con LOOKBACK_15M para PARIDAD EXACTA del último valor de los indicadores
+    // recursivos (EMA/ADX/MFI/CHOP) entre live y backtest (fix auditoría #10).
+    this.bufferSize = options.bufferSize ?? LOOKBACK_15M;
+    this.minCandles = options.minCandles ?? 120;
 
     // Validación out-of-sample: split temporal train/holdout
     this.oosSplitRatio = options.oosSplitRatio ?? 0.7; // 70% train, 30% holdout
@@ -58,6 +80,15 @@ class BacktestEngine {
       equityCurve: [],
       cooldowns: {}
     };
+
+    // Trackers de drawdown a RESOLUCIÓN COMPLETA (fix #1): el equityCurve almacenado se
+    // submuestrea a ~1h para el plot, pero el MaxDD se mide en CADA vela aquí, por fase.
+    this.ddTrack = {
+      full:    { peak: -Infinity, maxDD: 0 },
+      train:   { peak: -Infinity, maxDD: 0 },
+      holdout: { peak: -Infinity, maxDD: 0 },
+    };
+    this.lastEventTime = 0; // máximo timestamp de vela visto (para cierres END_OF_BACKTEST)
   }
 
   filterSymbols(symbols) {
@@ -110,14 +141,8 @@ class BacktestEngine {
   }
 
   async run() {
-    const strategyNames = {
-      1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)',
-      '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)'
-    };
-    const strategyName = strategyNames[this.strategyVersion] || 'V3 (ADX+Trailing)';
-
     console.log('🚀 Iniciando simulación...');
-    console.log(`📋 Estrategia: ${strategyName}`);
+    console.log(`📋 Estrategia: ${strategyName(this.strategyVersion)}`);
     if (this.exitMode === 'atr') {
       console.log(`🎯 EXIT=ATR | SL=${this.atrSLMult}×ATR | Chandelier=${this.atrTrailMult}×ATR | partial@${this.partialExitAtR}R`);
     } else {
@@ -162,6 +187,10 @@ class BacktestEngine {
     this.buyHold = this.computeBuyHold(dataBySymbol);
     this.buyHoldTrain = this.computeBuyHold(dataBySymbol, null, this.splitTime);
     this.buyHoldHoldout = this.computeBuyHold(dataBySymbol, this.splitTime, null);
+    // Benchmark BTC-only HODL (fix #19): aísla el alfa de la estrategia del azar de selección
+    // de la cesta. Solo se computa si BTC está en el universo.
+    const btcSym = Object.keys(dataBySymbol).find(s => s.includes('BTC'));
+    this.btcHold = btcSym ? this.computeBuyHold({ [btcSym]: dataBySymbol[btcSym] }) : null;
 
     // Buffers OHLCV por símbolo (V3 necesita high, low, volume además de close)
     const candleBuffers = {};
@@ -182,7 +211,8 @@ class BacktestEngine {
       buf.lows.push(low);
       buf.volumes.push(volume);
       currentPrices[symbol] = close;
-      
+      if (time > this.lastEventTime) this.lastEventTime = time;
+
       // Mantener buffer (configurable; V5 necesita >200 para EMA200)
       const maxBuf = this.bufferSize;
       if (buf.closes.length > maxBuf) {
@@ -219,13 +249,13 @@ class BacktestEngine {
       const hasPosition = !!this.state.openPositions[symbol];
       const isOnCooldown = this.state.cooldowns[symbol] && this.state.cooldowns[symbol] > 0;
 
-      // Lógica de Compra
-      if (signal === 'BUY' && !hasPosition && !isOnCooldown) {
+      // Lógica de Compra (con caps de cartera, fix #26)
+      if (signal === 'BUY' && !hasPosition && !isOnCooldown && this.canOpenPosition(currentPrices)) {
         // Si modo ATR, anclar SL/peak iniciales con ATR del momento
         const entryATR = this.exitMode === 'atr'
           ? this.getCurrentATR(buf)
           : null;
-        this.executeBuy(symbol, close, time, entryATR);
+        this.executeBuy(symbol, close, time, entryATR, buf);
       }
       // Lógica de Venta por señal
       else if (signal === 'SELL' && hasPosition) {
@@ -249,21 +279,61 @@ class BacktestEngine {
         }
       }
 
-      this.recordEquity(time, currentPrices);
+      this.trackDrawdown(time, currentPrices); // MaxDD a resolución completa (fix #1)
+      this.recordEquity(time, currentPrices);  // curva submuestreada para el plot
     }
 
-    // Cerrar posiciones al final
+    // Cerrar posiciones al final usando el ÚLTIMO timestamp de vela (no Date.now(), fix #9):
+    // evita duraciones infladas cuando los datos terminan en el pasado.
+    const closeTime = this.lastEventTime || Date.now();
     for (const symbol in this.state.openPositions) {
       if (currentPrices[symbol]) {
-        this.executeSell(symbol, currentPrices[symbol], Date.now(), 'END_OF_BACKTEST');
+        this.executeSell(symbol, currentPrices[symbol], closeTime, 'END_OF_BACKTEST');
       }
     }
+    // Punto final de equity (sin throttle) para que la curva acabe en finalBalance
+    this.trackDrawdown(closeTime, currentPrices);
+    this.recordEquity(closeTime, currentPrices, true);
 
     return this.generateReport();
   }
 
-  executeBuy(symbol, price, time, entryATR = null) {
-    const investAmount = this.state.balance * this.positionSizePct;
+  // Fracción del balance a invertir en una nueva posición. Por defecto positionSizePct;
+  // con vol-targeting activado (config VOLTARGET) escala el tamaño base por volatilidad
+  // realizada: menos tamaño cuando la moneda está volátil (investigación §2.1).
+  computeSizeFraction(buf) {
+    let frac = this.positionSizePct;
+    if (this.volTarget && this.volTarget.enabled && buf && buf.closes.length > 20) {
+      const w = computeVolTargetWeight(buf.closes, {
+        ...this.volTarget,
+        periodsPerYear: periodsPerYearFor(this.interval),
+      });
+      frac = this.positionSizePct * w;
+      if (w <= (this.volTarget.minWeight ?? 0)) frac = 0;
+    }
+    return frac;
+  }
+
+  // Caps de cartera (fix #26): nº máximo de posiciones simultáneas y exposición agregada.
+  canOpenPosition(currentPrices) {
+    const openCount = Object.keys(this.state.openPositions).length;
+    if (this.maxConcurrentPositions != null && openCount >= this.maxConcurrentPositions) return false;
+    if (this.maxExposurePct != null) {
+      const eq = this.currentEquity(currentPrices);
+      let invested = 0;
+      for (const s in this.state.openPositions) {
+        const p = this.state.openPositions[s];
+        invested += p.amount * (currentPrices[s] || p.buyPrice);
+      }
+      if (eq > 0 && invested / eq >= this.maxExposurePct) return false;
+    }
+    return true;
+  }
+
+  executeBuy(symbol, price, time, entryATR = null, buf = null) {
+    const sizeFrac = this.computeSizeFraction(buf);
+    if (sizeFrac <= 0) return; // vol-targeting devolvió peso 0 (régimen demasiado volátil)
+    const investAmount = this.state.balance * sizeFrac;
 
     // Costes de entrada: slippage (peor precio de compra) + comisión sobre el notional.
     // amountCrypto se reduce por ambos → el coste queda baked-in en el P&L y la equity.
@@ -293,20 +363,22 @@ class BacktestEngine {
   }
 
   applyFixedExits(symbol, close, time, pos) {
-    const profitPct = ((close - pos.buyPrice) / pos.buyPrice) * 100;
+    // Decisión vía la FUENTE ÚNICA compartida con el bot live (fix #2 → paridad garantizada).
+    const d = evaluateFixedExit(pos, close, {
+      takeProfitPct: this.takeProfitPct,
+      stopLossPct: this.stopLossPct,
+      trailingActivation: this.trailingActivation,
+      trailingDistance: this.trailingDistance,
+    });
+    pos.peakPrice = d.peakPrice;
+    pos.trailingActivated = d.trailingActivated;
+    pos.trailingSL = d.trailingSL;
 
-    if (profitPct >= this.trailingActivation) {
-      pos.trailingActivated = true;
-      const peakProfit = ((pos.peakPrice - pos.buyPrice) / pos.buyPrice) * 100;
-      const trailLevel = peakProfit * this.trailingDistance;
-      pos.trailingSL = pos.buyPrice * (1 + trailLevel / 100);
-    }
-
-    if (profitPct >= this.takeProfitPct) {
+    if (d.action === 'TAKE_PROFIT') {
       this.executeSell(symbol, close, time, 'TAKE_PROFIT');
-    } else if (pos.trailingActivated && close <= pos.trailingSL) {
+    } else if (d.action === 'TRAILING_STOP') {
       this.executeSell(symbol, close, time, 'TRAILING_STOP');
-    } else if (profitPct <= -this.stopLossPct) {
+    } else if (d.action === 'STOP_LOSS') {
       this.executeSell(symbol, close, time, 'STOP_LOSS');
       this.state.cooldowns[symbol] = this.cooldownCandles;
     }
@@ -339,7 +411,9 @@ class BacktestEngine {
           profitPct: parseFloat(partialPct.toFixed(2)),
           buyTime: pos.time, sellTime: new Date(time).toISOString(),
           reason: 'PARTIAL_TP',
-          phase: (this.splitTime && new Date(pos.time).getTime() >= this.splitTime) ? 'holdout' : 'train'
+          // Fase por sellTime (fix #7/#20): el P&L se realiza al CIERRE, así la métrica por
+          // trade coincide con el tramo de equity donde realmente impacta.
+          phase: (this.splitTime && time >= this.splitTime) ? 'holdout' : 'train'
         });
         pos.amount -= halfAmount;
         pos.invested -= halfInvested;
@@ -373,8 +447,9 @@ class BacktestEngine {
     const profitPct = (profit / pos.invested) * 100;
 
     this.state.balance += returnAmount;
-    const buyTimeMs = new Date(pos.time).getTime();
-    const phase = (this.splitTime && buyTimeMs >= this.splitTime) ? 'holdout' : 'train';
+    // Fase por sellTime (fix #7/#20): el P&L se realiza al cerrar, así la métrica por trade
+    // queda atribuida a la misma fase (train/holdout) donde mueve la equity.
+    const phase = (this.splitTime && time >= this.splitTime) ? 'holdout' : 'train';
     this.state.tradeHistory.push({
       symbol,
       buyPrice: pos.buyPrice,
@@ -422,24 +497,84 @@ class BacktestEngine {
     return { roi: parseFloat(roi.toFixed(2)), maxDrawdown: parseFloat(maxDD.toFixed(2)) };
   }
 
-  recordEquity(time, currentPrices) {
-    const lastRecord = this.state.equityCurve[this.state.equityCurve.length - 1];
-    if (lastRecord && (time - lastRecord.time) < 3600000) return;
-
+  // Equity total (cash + posiciones valoradas a mercado) en este instante.
+  currentEquity(currentPrices) {
     let investedValue = 0;
     for (const s in this.state.openPositions) {
       const pos = this.state.openPositions[s];
       investedValue += pos.amount * (currentPrices[s] || pos.buyPrice);
     }
-    
-    const totalEquity = this.state.balance + investedValue;
+    return this.state.balance + investedValue;
+  }
+
+  // MaxDrawdown a RESOLUCIÓN COMPLETA: se llama en CADA vela (fix #1). Mantiene un peak/maxDD
+  // por fase, independiente del equityCurve submuestreado (que es solo para el plot). Así el
+  // DD reportado y el de computeBuyHold se miden con la misma granularidad por-vela.
+  trackDrawdown(time, currentPrices) {
+    const eq = this.currentEquity(currentPrices);
+    const update = (acc) => {
+      if (eq > acc.peak) acc.peak = eq;
+      if (acc.peak > 0) {
+        const dd = (acc.peak - eq) / acc.peak * 100;
+        if (dd > acc.maxDD) acc.maxDD = dd;
+      }
+    };
+    update(this.ddTrack.full);
+    if (this.splitTime == null || time < this.splitTime) update(this.ddTrack.train);
+    else update(this.ddTrack.holdout);
+  }
+
+  recordEquity(time, currentPrices, force = false) {
+    const lastRecord = this.state.equityCurve[this.state.equityCurve.length - 1];
+    if (!force && lastRecord && (time - lastRecord.time) < 3600000) return;
+
+    const totalEquity = this.currentEquity(currentPrices);
     this.state.equityCurve.push({ time, equity: parseFloat(totalEquity.toFixed(2)) });
   }
 
-  computeMetrics(trades, balanceStart, balanceEnd, equityCurveSubset) {
+  // Métricas riesgo-ajustadas (fix #18) sobre la serie de retornos de la curva de equity.
+  // Sharpe/Sortino anualizados con periodsPerYear inferido del espaciado mediano de la curva.
+  // Calmar = retorno anualizado / |MaxDD|. rf=0 (típico en cripto).
+  computeRiskAdjusted(equityCurve, maxDDpct) {
+    const pts = (equityCurve || []).filter(p => isFinite(p.equity) && p.equity > 0);
+    if (pts.length < 3) return { sharpe: 0, sortino: 0, calmar: 0, annReturn: 0, annVol: 0 };
+    const rets = [];
+    const dts = [];
+    for (let i = 1; i < pts.length; i++) {
+      rets.push(Math.log(pts[i].equity / pts[i - 1].equity));
+      dts.push(pts[i].time - pts[i - 1].time);
+    }
+    dts.sort((a, b) => a - b);
+    const medianDt = dts[Math.floor(dts.length / 2)] || 3600000;
+    const periodsPerYear = medianDt > 0 ? (365 * 24 * 3600000) / medianDt : 365;
+    const n = rets.length;
+    const mean = rets.reduce((s, r) => s + r, 0) / n;
+    const variance = rets.reduce((s, r) => s + (r - mean) ** 2, 0) / n;
+    const std = Math.sqrt(variance);
+    const downside = rets.filter(r => r < 0);
+    const downVar = downside.length > 0 ? downside.reduce((s, r) => s + r * r, 0) / n : 0;
+    const downStd = Math.sqrt(downVar);
+    const annReturn = (Math.exp(mean * periodsPerYear) - 1) * 100;
+    const annVol = std * Math.sqrt(periodsPerYear) * 100;
+    const sharpe = std > 0 ? (mean / std) * Math.sqrt(periodsPerYear) : 0;
+    const sortino = downStd > 0 ? (mean / downStd) * Math.sqrt(periodsPerYear) : 0;
+    const calmar = maxDDpct > 0 ? annReturn / maxDDpct : 0;
+    return {
+      sharpe: parseFloat(sharpe.toFixed(2)),
+      sortino: parseFloat(sortino.toFixed(2)),
+      calmar: parseFloat(calmar.toFixed(2)),
+      annReturn: parseFloat(annReturn.toFixed(2)),
+      annVol: parseFloat(annVol.toFixed(2)),
+    };
+  }
+
+  computeMetrics(trades, balanceStart, balanceEnd, equityCurveSubset, precomputedMaxDD = null) {
     const totalTrades = trades.length;
+    // Convención de clasificación (fix #27): ganadoras profit>0, perdedoras profit<0,
+    // breakeven profit==0 en su propio bucket (no infla las pérdidas).
     const winners = trades.filter(t => t.profit > 0);
-    const losers = trades.filter(t => t.profit <= 0);
+    const losers = trades.filter(t => t.profit < 0);
+    const breakeven = trades.filter(t => t.profit === 0);
     const winRate = totalTrades > 0 ? (winners.length / totalTrades) * 100 : 0;
 
     const totalProfit = parseFloat((balanceEnd - balanceStart).toFixed(2));
@@ -447,15 +582,22 @@ class BacktestEngine {
 
     const grossProfit = winners.reduce((s, t) => s + t.profit, 0);
     const grossLoss = Math.abs(losers.reduce((s, t) => s + t.profit, 0));
-    const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0;
+    // profitFactor (fix #8): sin pérdidas y con ganancias = Infinity (no 0, que es el peor valor).
+    const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? Infinity : 0);
 
-    let maxEquity = balanceStart;
-    let maxDD = 0;
-    (equityCurveSubset || []).forEach(p => {
-      if (p.equity > maxEquity) maxEquity = p.equity;
-      const dd = (maxEquity - p.equity) / maxEquity * 100;
-      if (dd > maxDD) maxDD = dd;
-    });
+    // MaxDD: usa el tracker per-bar si está disponible (fix #1); si no, cae a la curva.
+    let maxDD;
+    if (precomputedMaxDD != null) {
+      maxDD = precomputedMaxDD;
+    } else {
+      let maxEquity = balanceStart;
+      maxDD = 0;
+      (equityCurveSubset || []).forEach(p => {
+        if (p.equity > maxEquity) maxEquity = p.equity;
+        const dd = (maxEquity - p.equity) / maxEquity * 100;
+        if (dd > maxDD) maxDD = dd;
+      });
+    }
 
     const avgWin = winners.length > 0 ? grossProfit / winners.length : 0;
     const avgLoss = losers.length > 0 ? grossLoss / losers.length : 0;
@@ -480,15 +622,23 @@ class BacktestEngine {
       if (t.profit > 0) bySymbol[t.symbol].wins++;
     });
 
+    const risk = this.computeRiskAdjusted(equityCurveSubset, maxDD);
+
     return {
       totalTrades,
       winningTrades: winners.length,
       losingTrades: losers.length,
+      breakevenTrades: breakeven.length,
       winRate: parseFloat(winRate.toFixed(2)),
       totalProfit,
       roi: parseFloat(roi.toFixed(2)),
-      profitFactor: parseFloat(profitFactor.toFixed(2)),
+      profitFactor: isFinite(profitFactor) ? parseFloat(profitFactor.toFixed(2)) : null, // null = sin pérdidas (PF=∞)
       maxDrawdown: parseFloat(maxDD.toFixed(2)),
+      sharpe: risk.sharpe,
+      sortino: risk.sortino,
+      calmar: risk.calmar,
+      annReturn: risk.annReturn,
+      annVol: risk.annVol,
       avgWin: parseFloat(avgWin.toFixed(2)),
       avgLoss: parseFloat(avgLoss.toFixed(2)),
       expectancy: parseFloat(expectancy.toFixed(2)),
@@ -499,9 +649,7 @@ class BacktestEngine {
   }
 
   generateReport() {
-    const strategyNames = { 1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)' };
-
-    // Full curve & drawdown
+    // Full curve & drawdown (plot). El DD reportado de las métricas usa el tracker per-bar.
     let maxEquity = this.initialBalance;
     const drawdownCurve = [];
     this.state.equityCurve.forEach(p => {
@@ -510,12 +658,13 @@ class BacktestEngine {
       drawdownCurve.push({ time: p.time, drawdown: parseFloat(dd.toFixed(2)) });
     });
 
-    // Full metrics
+    // Full metrics (MaxDD per-bar de ddTrack.full)
     const fullMetrics = this.computeMetrics(
       this.state.tradeHistory,
       this.initialBalance,
       this.state.balance,
-      this.state.equityCurve
+      this.state.equityCurve,
+      this.ddTrack.full.maxDD
     );
 
     // Train/holdout split
@@ -532,10 +681,10 @@ class BacktestEngine {
         : this.initialBalance;
 
       trainMetrics = this.computeMetrics(
-        trainTrades, this.initialBalance, balanceAtSplit, trainCurve
+        trainTrades, this.initialBalance, balanceAtSplit, trainCurve, this.ddTrack.train.maxDD
       );
       holdoutMetrics = this.computeMetrics(
-        holdoutTrades, balanceAtSplit, this.state.balance, holdoutCurve
+        holdoutTrades, balanceAtSplit, this.state.balance, holdoutCurve, this.ddTrack.holdout.maxDD
       );
       trainMetrics.splitTime = splitIso;
       holdoutMetrics.splitTime = splitIso;
@@ -548,8 +697,10 @@ class BacktestEngine {
         initialBalance: this.initialBalance,
         finalBalance: parseFloat(this.state.balance.toFixed(2)),
         periodMonths: this.months,
+        interval: this.interval,
         symbols: this.symbols,
-        strategy: strategyNames[this.strategyVersion] || 'V3 (ADX+Trailing)',
+        strategy: strategyName(this.strategyVersion),
+        strategyVersion: this.strategyVersion,
         oosSplitRatio: this.oosSplitRatio,
         costs: {
           feePct: this.feePct,
@@ -557,6 +708,8 @@ class BacktestEngine {
           roundTripPct: parseFloat(((this.feePct + this.slippagePct) * 2 * 100).toFixed(3))
         },
         buyHold: this.buyHold || null,
+        btcHold: this.btcHold || null,
+        dataEndTime: this.lastEventTime ? new Date(this.lastEventTime).toISOString() : null,
         ...fullMetrics
       },
       trainSummary: trainMetrics,

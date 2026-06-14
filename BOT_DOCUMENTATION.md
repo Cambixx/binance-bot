@@ -6,11 +6,14 @@ Este proyecto es un bot de trading automatizado diseñado para operar en Binance
 **Arquitectura principal:**
 El bot está construido en Node.js y diseñado para ejecutarse como una **función Serverless** en **Netlify**. Se ejecuta automáticamente cada 15 minutos mediante un Cron Job (`trader-cron.js`).
 
-**Dos canales shadow en paralelo (desde 2026-05-30):** el cron corre dos carteras virtuales INDEPENDIENTES para comparar enfoques con datos reales:
+**Canales shadow en paralelo:** el cron corre carteras virtuales INDEPENDIENTES para comparar enfoques con datos reales:
 - **📡 V4C-15m** (`bot.js` → blob `bot_state_v2`): generador de señales 15m (V4C-COMBO). Generador disciplinado, sin alfa demostrable neto de costes.
-- **📅 SMA200-1d** (`dailyBot.js` → blob `bot_state_daily_v1`): regime-timer DIARIO (estilo Faber). In-or-out: invertido si cierre diario > SMA200, cash si no. La estrategia validada que bate a buy&hold en riesgo-ajustado (§1.2). Idempotente intra-día (solo opera al cambiar la señal diaria).
+- **📅 SMA200-1d** (`dailyBot.js` → blob `bot_state_daily_v1`): regime-timer DIARIO (estilo Faber). In-or-out: invertido si cierre diario > SMA200·(1+band), cash si no. La estrategia validada que bate a buy&hold en riesgo-ajustado (§1.2). Idempotente intra-día.
+- **🔄 ROT-dual-mom** (`rotationBot.js` → blob `bot_state_rotation_v1`): **EXPERIMENTAL**, rotación cross-sectional + dual-momentum (investigación 2026-06). Top-N por retorno trailing 30d + gate de momentum absoluto + gate BTC; si no, cash. Se activa con `ROTATION_ENABLED=true`.
 
-`/status` en Telegram muestra ambos canales lado a lado.
+`/status` en Telegram muestra los canales activos lado a lado.
+
+> **🔎 Auditoría 2026-06-14:** auditoría profunda multi-agente (35 hallazgos verificados adversarialmente) + investigación cost-aware, con todas las correcciones y mejoras aplicadas. Ver **`AUDIT_REPORT.md`**. Cambios clave: paridad live↔backtest del trailing garantizada por `exits.js` (fuente única), MaxDrawdown medido por-vela, Sharpe/Sortino/Calmar computados de verdad, benchmark BTC HODL, lectura/escritura transaccional del estado, retry/backoff de la API, validación rigurosa (walk-forward / Monte Carlo / Deflated Sharpe / PBO) y suite de tests (`npm test`).
 
 ### 1.1 Enfoque del proyecto — leer antes de "optimizar"
 Un barrido riguroso de 12 meses **con costes reales (0.30% round-trip)** sobre 19+ configuraciones (V3, V4C, V5, V6; 15m y 1h; ver `sweep.js`) demostró que **ninguna familia de TA intradía tiene un edge que sobreviva a los costes fuera de muestra** (todas con Profit Factor < 1.0 en el periodo completo). El alfa de análisis técnico retail en cripto líquido intradía neto de costes es prácticamente nulo.
@@ -26,9 +29,13 @@ Tras investigación online consciente de costes, se implementaron estrategias **
 | Donchian 55/20 + regime | +6.3% | −27.5% | 0.23 | −0.3%, DD −12.6% (la más defensiva) |
 | SuperTrend diario + regime | +13.6% | −30.9% | 0.44 | −2.8%, DD −20.4% |
 
-**Hallazgo clave:** la familia diaria **sobrevive a los costes** (baja frecuencia, ~20 trades/año en 7 monedas) y **mejora el retorno-ajustado-a-riesgo vs buy&hold**: SMA200 bate a HODL en retorno y recorta el drawdown ~41%. En el holdout (un mercado bajista donde HODL perdió −44%), preservó capital (−5%). Robusto: SMA150/200/250 forman un *plateau* (todas baten el Calmar de HODL); no es overfit.
+**Hallazgo clave:** la familia diaria **sobrevive a los costes** (baja frecuencia) y **mejora el retorno-ajustado-a-riesgo vs buy&hold**: SMA200 bate a HODL equiponderado en retorno y recorta mucho el drawdown.
 
-> **NO es alfa, es reducción de drawdown / preservación de capital (mejor Sharpe)** — el objetivo realista y honesto. Para llevarlo a producción habría que decidir si el bot live (que corre cada 15m) pasa a evaluar la señal DIARIA al cierre (regime-timer in-or-out) o se ejecuta en paralelo al generador de señales 15m. Es un cambio de naturaleza del bot, pendiente de decisión.
+> ⚠️ **Actualización honesta (auditoría 2026-06-14):** el Sharpe/Calmar antes citados (Calmar 0.64) **nunca se computaban en el motor** — eran estimaciones. Ahora el motor los calcula de verdad (`computeRiskAdjusted`). Cifra real SMA200 diaria (40 meses, cesta fija large-caps, costes 0.30%, MaxDD medido **por-vela**): **ROI +28.7% vs HODL equiponderado −5.3%; MaxDD −35.9% vs HODL −63.9%; Calmar 0.31; Sharpe 0.34.** (BTC-solo HODL hizo +110% a DD −51% — en mercados monedireccionales alcistas HODL de BTC gana; el valor de la SMA200 es la **preservación de capital en bajistas**.)
+>
+> El `walkforward.js` añadido confirma el matiz: la SMA200 es **inconsistente fold-a-fold en retorno** pero preserva capital en crashes (p.ej. fold 2025-11→2026-06: 0% en cash mientras HODL hizo −44.9%). Correr `npm run walkforward -- --sma200` y `npm run validate -- --sma200 --permute` para el dato vigente.
+
+> **NO es alfa, es reducción de drawdown / preservación de capital** — el objetivo realista y honesto. La decisión de qué canal llevar a real debe basarse en la comparación shadow OOS de los tres canales (`/status`), no en backtests in-sample.
 
 ---
 
@@ -216,19 +223,26 @@ El runner imprime un bloque al final con la comparativa **train vs holdout** y e
 
 ## 4. Estructura de Módulos
 
-*   **`config.js`:** ⭐ Configuración CENTRALIZADA (fuente única de verdad): blacklist, parámetros de riesgo (`RISK`), costes (`COSTS`), filtros de régimen (`STRATEGY_OPTS`), universo. Importado por bot/backtest/engine/shadowTrader para paridad total.
-*   **`indicators.js`:** Estrategias y helpers de indicadores.
-    *   Estrategias: `evaluateStrategy` (V1), `evaluateStrategyV2`, `evaluateStrategyV3`, `evaluateStrategyV4A` (Supertrend), `evaluateStrategyV4B` (V3 + ATR exits), `evaluateStrategyV4C` (V3 + regime gate — la productiva).
-    *   Helpers: `calculateEMA`, `calculateRSI`, `calculateATR`, `calculateSupertrend`, `calculateChoppinessIndex`, `calculateBBW`.
-*   **`backtestEngine.js`:** Motor de simulación. Descarga datos paginada, cronología unificada de eventos por símbolo, dispatcher de estrategia por versión, dos modos de exit (`fixed` y `atr`), división train/holdout y métricas completas.
-*   **`backtest.js`:** Runner de consola. Parsea flags CLI, ejecuta el engine, escribe JSON e inyecta los resultados en el HTML.
-*   **`backtest-report.html`:** Plantilla del reporte visual.
-*   **`bot.js`:** Canal 15m (V4C-COMBO). Importa `evaluateStrategyV4C` + `config.js`, descarta la vela en curso, respeta cooldown post-SL, gestiona TP/SL/trailing y persiste vía `shadowTrader` (default).
-*   **`dailyBot.js`:** Canal diario (SMA200 regime-timer). `runDailyBot()` evalúa la señal SMA200 sobre velas diarias cerradas e invierte/sale a cash vía `dailyTrader`. Idempotente intra-día.
-*   **`shadowTrader.js`:** Gestiona el estado en **Netlify Blobs**. `ShadowTrader` parametrizado por `storeKey`/`label` (cada canal su cartera). Exporta el canal 15m (default) y `dailyTrader` (SMA200-1d). Aplica costes (fees+slippage) en buy/sell, persiste `peakPrice`/`trailingActivated`/`cooldowns`, y `getStats(currentPrices)` valora a mercado con P&L realizado/no realizado. Mensajes Telegram etiquetados por canal y con modo régimen (sin TP/SL fijo).
-*   **`binanceService.js`:** Cliente HTTP de Binance (klines, top por volumen, `getPrices` para valorar a mercado).
-*   **`telegramService.js`:** Notificaciones de trades al canal de Telegram.
-*   **`shadow-report.js`:** Genera un HTML auditable con el estado real del bot (descarga el blob y lo renderiza).
+*   **`config.js`:** ⭐ Configuración CENTRALIZADA (fuente única): blacklist, `RISK` (incl. caps de cartera), `COSTS`, `STRATEGY_OPTS`, `LOOKBACK_15M`, `SMA_HYSTERESIS_BAND`, `VOLTARGET`, `REGIME` (gate BTC), `ROTATION`. Importado por todo para paridad total.
+*   **`indicators.js`:** Estrategias y primitivas.
+    *   Estrategias: V1-V6, familia diaria (`evaluateStrategySMA200` con banda, `evaluateStrategySupertrendDaily`, `evaluateStrategyDonchian`).
+    *   Helpers: `calculateEMA/RSI/ATR/Supertrend/ChoppinessIndex/BBW`.
+    *   Primitivas de cartera (nuevas): `computeVolTargetWeight`, `periodsPerYearFor`, `trailingReturn`, `btcRegimeOn`, `computeRotationTargets`.
+*   **`exits.js`:** ⭐ `evaluateFixedExit(pos, price, params)` — lógica de salida TP/SL/Trailing **compartida por el motor y el bot live** (garantiza paridad por construcción; fix auditoría #2).
+*   **`backtestEngine.js`:** Motor. Descarga paginada, cronología unificada, dispatcher por versión, exits `fixed`/`atr`/`signal`, split train/holdout, MaxDD **por-vela**, métricas riesgo-ajustadas (Sharpe/Sortino/Calmar), benchmarks (cesta equiponderada + BTC HODL), vol-targeting opcional y caps. Exporta `STRATEGY_NAMES`/`strategyName`.
+*   **`backtest.js`:** Runner de consola (flags CLI, JSON, HTML).
+*   **`bot.js`:** Canal 15m (V4C-COMBO). Lectura/escritura transaccional (`beginSession`/`commitSession`), salidas vía `exits.js`, cooldown anclado a vela, vol-targeting/caps/gate BTC opcionales, alerta de fallo a Telegram.
+*   **`dailyBot.js`:** Canal diario (SMA200 + banda). Transaccional, idempotente intra-día, alerta de fallo.
+*   **`rotationBot.js`:** Canal de rotación cross-sectional + dual-momentum (experimental, `ROTATION_ENABLED`).
+*   **`shadowTrader.js`:** Estado en **Netlify Blobs** con patrón transaccional (`beginSession`/`applyBuy`/`applySell`/`applyUpdatePosition`/`commitSession`). Cada canal su cartera (`storeKey`/`label`). Costes en buy/sell, `profitUSDC` numérico a precisión completa, cooldown anclado a vela, escape HTML, `getStats` con realizado vs latente separados.
+*   **`binanceService.js`:** Cliente HTTP con timeout + retry/backoff (429/418), host de datos y host firmado separados.
+*   **`telegramService.js`:** Notificaciones (+ `escape` para HTML).
+*   **`validation.js`:** Estadística de validación (bootstrap CI, block bootstrap, Deflated Sharpe, PBO/CSCV, normal CDF/inv, PRNG determinista).
+*   **`walkforward.js`:** Walk-forward de ventana anclada expansiva (distribución de métricas por fold).
+*   **`validate.js`:** Bootstrap de trades + significancia (Deflated Sharpe) + Monte Carlo de permutación.
+*   **`sweep.js`:** Barrido de hipótesis con costes + OOS + corrección de multiple-testing (Deflated Sharpe + PBO).
+*   **`shadow-report.js` / `*.html`:** Reportes HTML auditables.
+*   **`test/`:** Suite de tests (`npm test`, node:test, 29 tests).
 
 ---
 
@@ -236,10 +250,15 @@ El runner imprime un bloque al final con la comparativa **train vs holdout** y e
 
 | Comando | Acción |
 |---|---|
-| `npm run backtest` | Ejecuta backtest V4C-COMBO (default productivo). |
-| `npm run backtest -- --months=N` | Backtest sobre N meses. |
-| `npm run backtest -- --v3` | Backtest con el baseline V3 (regresión). |
-| `npm run shadow-report` | Descarga `bot_state_v2` desde Netlify Blobs y genera `shadow-report-output.html` con el estado real del bot. |
+| `npm test` | Corre la suite de tests (node:test, zero-dep). |
+| `npm run backtest` | Backtest V4C-COMBO sobre la **cesta fija de large-caps** (sin sesgo de supervivencia). |
+| `npm run backtest -- --sma200 --months=36` | Backtest de la familia diaria validada. |
+| `npm run backtest -- --universe=10` | Top-10 dinámico de Binance (⚠️ sesgo de supervivencia, etiquetado). |
+| `npm run backtest -- --voltarget` | Backtest con vol-targeting activado. |
+| `npm run walkforward -- --sma200` | Validación walk-forward (distribución por fold). |
+| `npm run validate -- --sma200 --permute=200` | Bootstrap CI + Deflated Sharpe + Monte Carlo de permutación. |
+| `node sweep.js` | Barrido de hipótesis con DSR + PBO (multiple-testing). |
+| `npm run shadow-report` | Descarga `bot_state_v2` desde Netlify Blobs y genera `shadow-report-output.html`. |
 | `npm run sync` | Descarga el estado de la nube a un archivo local (`shadow_trades_sync.json`) para auditoría. |
 | `npm run reset` | Borra todo el historial y resetea el capital a 5000 USDC. |
 | `npm run clear-blobs` | Alias de `reset`. |
@@ -249,10 +268,12 @@ El runner imprime un bloque al final con la comparativa **train vs holdout** y e
 ---
 
 ## 6. Variables de Entorno
-Configuradas en el panel de Netlify:
-*   `BINANCE_API_KEY` / `BINANCE_API_SECRET`
+Configuradas en el panel de Netlify (ver `.env.example`):
+*   `BINANCE_API_KEY` / `BINANCE_API_SECRET` — **opcionales** (el bot shadow usa datos públicos; solo necesarias para `test_connection.js` o trading real). Si una clave se filtró, **rótala**.
 *   `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`
 *   `TELEGRAM_ENABLED`: "true"
+*   `TELEGRAM_WEBHOOK_SECRET` — secret token del webhook (recomendado; ver §5 de `AUDIT_REPORT.md`). Registra el webhook con `secret_token` y este valor.
+*   `ROTATION_ENABLED`: "true" para activar el canal experimental de rotación.
 
 ---
 

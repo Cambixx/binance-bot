@@ -14,7 +14,22 @@
  */
 import fs from 'fs';
 import BacktestEngine from './backtestEngine.js';
+import { deflatedSharpe, probabilityOfBacktestOverfitting, variance } from './validation.js';
 import { BLACKLIST, STRATEGY_OPTS, RISK, COSTS } from './config.js';
+
+// Performance por bloque temporal (suma de retornos log de la equity) para PBO/CSCV.
+function chunkPerformance(equityCurve, S) {
+  const pts = (equityCurve || []).filter(p => p.equity > 0);
+  if (pts.length < S + 1) return null;
+  const per = Math.floor(pts.length / S);
+  const out = [];
+  for (let c = 0; c < S; c++) {
+    const a = pts[c * per];
+    const b = c === S - 1 ? pts[pts.length - 1] : pts[(c + 1) * per];
+    out.push(Math.log((b.equity || 1) / (a.equity || 1)));
+  }
+  return out; // longitud S
+}
 
 const args = process.argv.slice(2);
 const monthsArg = args.find(a => a.startsWith('--months='));
@@ -80,6 +95,9 @@ async function main() {
   console.error(`Hipótesis: ${HYPOTHESES.length} × ${TIMEFRAMES.length} timeframes = ${HYPOTHESES.length * TIMEFRAMES.length} backtests\n`);
 
   const rows = [];
+  const PBO_CHUNKS = 10;        // bloques temporales para CSCV (par, >=4)
+  const perTf = {};             // por timeframe: [{name, sharpe, chunks}] para DSR/PBO
+  TIMEFRAMES.forEach(tf => { perTf[tf] = []; });
 
   for (const tf of TIMEFRAMES) {
     console.error(`📥 Descargando datos ${tf} (una vez)...`);
@@ -137,10 +155,13 @@ async function main() {
       rows.push({
         config: h.name, tf, robust: v.robust, score: v.score, reasons: v.reasons,
         fullROI: s.roi, fullPF: s.profitFactor, fullWR: s.winRate, fullTrades: s.totalTrades, maxDD: s.maxDrawdown,
+        sharpe: s.sharpe, calmar: s.calmar,
         trainPF: t.profitFactor, trainROI: t.roi,
         holdoutPF: ho.profitFactor, holdoutROI: ho.roi, holdoutWR: ho.winRate, holdoutTrades: ho.totalTrades,
       });
-      console.error(`   ${v.robust ? '✅' : '  '} ${h.name.padEnd(20)}@${tf.padEnd(3)} fullPF=${String(s.profitFactor).padEnd(5)} holdoutPF=${String(ho.profitFactor).padEnd(5)} holdoutROI=${String(ho.roi).padEnd(7)} n=${ho.totalTrades}`);
+      // Para DSR/PBO: guardar Sharpe y la performance por bloque de cada config (por timeframe)
+      perTf[tf].push({ name: h.name, sharpe: s.sharpe, chunks: chunkPerformance(result.equityCurve, PBO_CHUNKS) });
+      console.error(`   ${v.robust ? '✅' : '  '} ${h.name.padEnd(20)}@${tf.padEnd(3)} fullPF=${String(s.profitFactor).padEnd(5)} holdoutPF=${String(ho.profitFactor).padEnd(5)} holdoutROI=${String(ho.roi).padEnd(7)} Sharpe=${String(s.sharpe).padEnd(6)} n=${ho.totalTrades}`);
     }
   }
 
@@ -167,7 +188,34 @@ async function main() {
     robustOnes.slice(0, 3).forEach((r, i) => console.error(`   ${i + 1}. ${r.config} @${r.tf} — holdout PF ${r.holdoutPF}, ROI ${r.holdoutROI}%, n=${r.holdoutTrades}`));
   }
 
-  fs.writeFileSync('sweep-results.json', JSON.stringify({ months: MONTHS, symbols: SYMBOLS, timeframes: TIMEFRAMES, rows }, null, 2));
+  // ───────── Corrección de multiple-testing: Deflated Sharpe + PBO (fix #34) ─────────
+  // Elegir el mejor de N configs sobre el MISMO holdout es in-sample al proceso de selección.
+  // DSR descuenta el Sharpe por el nº de pruebas; PBO/CSCV estima P(el ganador IS sea perdedor OOS).
+  console.error('\n══════════ 🛡️ MULTIPLE-TESTING (DSR + PBO por timeframe) ══════════');
+  const overfitting = {};
+  for (const tf of TIMEFRAMES) {
+    const configs = perTf[tf].filter(c => c.sharpe != null && isFinite(c.sharpe));
+    if (configs.length < 2) { console.error(`  ${tf}: configs insuficientes`); continue; }
+    const sharpes = configs.map(c => c.sharpe);
+    const best = Math.max(...sharpes);
+    const varTrial = variance(sharpes);
+    // T aproximado: nº de bloques (proxy del nº de observaciones independientes disponibles)
+    const dsr = deflatedSharpe({ sharpe: best, nTrials: configs.length, varTrialSharpe: varTrial, T: PBO_CHUNKS + 1 });
+    // Matriz de performance por bloque [chunk][config]
+    const withChunks = configs.filter(c => Array.isArray(c.chunks) && c.chunks.length === PBO_CHUNKS);
+    let pbo = null;
+    if (withChunks.length >= 2) {
+      const matrix = [];
+      for (let chunk = 0; chunk < PBO_CHUNKS; chunk++) matrix.push(withChunks.map(c => c.chunks[chunk]));
+      pbo = probabilityOfBacktestOverfitting(matrix);
+    }
+    overfitting[tf] = { bestSharpe: best, nTrials: configs.length, dsr, pbo };
+    console.error(`  ${tf}: mejor Sharpe ${best} sobre ${configs.length} configs`);
+    if (dsr) console.error(`       DSR ${dsr.deflatedSharpe} ${dsr.passes ? '✅' : '🔻 (no supera el descuento de multiple-testing)'}`);
+    if (pbo && !pbo.error) console.error(`       PBO ${pbo.pbo} ${pbo.passes ? '✅ (<0.5)' : '🔻 (>=0.5, el ganador IS tiende a perder OOS)'}`);
+  }
+
+  fs.writeFileSync('sweep-results.json', JSON.stringify({ months: MONTHS, symbols: SYMBOLS, timeframes: TIMEFRAMES, rows, overfitting }, null, 2));
   console.error('\n📄 Resultados completos en sweep-results.json');
 }
 

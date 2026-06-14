@@ -1,0 +1,72 @@
+{
+  "strategy": "SMA200 (Faber regime, diaria)",
+  "months": 40,
+  "folds": 6,
+  "interval": "1d",
+  "symbols": [
+    "BTCUSDC",
+    "ETHUSDC",
+    "SOLUSDC",
+    "XRPUSDC",
+    "LINKUSDC",
+    "AVAXUSDC",
+    "LTCUSDC"
+  ],
+  "rows": [
+    {
+      "fold": 2,
+      "from": "2023-09-26",
+      "to": "2024-04-11",
+      "trades": 3,
+      "roi": 43.94,
+      "pf": 380.44,
+      "sharpe": 4.11,
+      "maxDD": 10.23,
+      "hodlRoi": 55.68
+    },
+    {
+      "fold": 3,
+      "from": "2024-04-11",
+      "to": "2024-10-27",
+      "trades": 20,
+      "roi": -19.34,
+      "pf": 1.99,
+      "sharpe": -2.49,
+      "maxDD": 21.98,
+      "hodlRoi": -23.3
+    },
+    {
+      "fold": 4,
+      "from": "2024-10-27",
+      "to": "2025-05-13",
+      "trades": 18,
+      "roi": 40.45,
+      "pf": 7.82,
+      "sharpe": 1.19,
+      "maxDD": 35.33,
+      "hodlRoi": 81.28
+    },
+    {
+      "fold": 5,
+      "from": "2025-05-13",
+      "to": "2025-11-27",
+      "trades": 33,
+      "roi": -5.95,
+      "pf": 0.85,
+      "sharpe": -0.45,
+      "maxDD": 25.76,
+      "hodlRoi": -17.03
+    },
+    {
+      "fold": 6,
+      "from": "2025-11-27",
+      "to": "2026-06-14",
+      "trades": 0,
+      "roi": 0,
+      "pf": 0,
+      "sharpe": 0,
+      "maxDD": 0,
+      "hodlRoi": -44.86
+    }
+  ]
+}
