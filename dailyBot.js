@@ -1,55 +1,58 @@
 import binance from './binanceService.js';
 import { dailyTrader } from './shadowTrader.js';
 import telegramService from './telegramService.js';
-import { evaluateStrategySMA200 } from './indicators.js';
-import { TOP_COINS_LIMIT, isBlacklisted, SMA_HYSTERESIS_BAND } from './config.js';
+import { evaluateStrategySMA200, computeVolTargetWeight } from './indicators.js';
+import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK } from './config.js';
 
 /**
- * BOT DIARIO — Market-timing de régimen SMA200 (estilo Faber). CANAL PARALELO al 15m.
+ * BOT DIARIO — Market-timing de régimen SMA (estilo Faber). CANAL PARALELO al 15m.
  *
- * Estrategia validada (backtest 36m, costes 0.30%, OOS): bate a buy&hold en
- * retorno-ajustado-a-riesgo y recorta el drawdown (ver BOT_DOCUMENTATION §1.2).
+ * Config tras auditoría 2026-06-19 (la familia validada, optimizada por riesgo-ajustado OOS):
+ *  - SMA_PERIOD = 150 (única longitud con holdout PF>1; ver config.js).
+ *  - Universo = cesta FIJA de large-caps (DAILY_BASKET), NO el top-10 por volumen volátil.
+ *  - Vol-targeting POR-CANAL: el tamaño se escala por volatilidad realizada (mejora Calmar/MaxDD
+ *    OOS). Se cablea aquí, NO con VOLTARGET.enabled global (eso afectaría a V4C/ROT).
  *
- * Lógica in-or-out por moneda: invertido si cierre DIARIO > SMA200·(1+band), cash si
- * < SMA200·(1-band). La banda de histéresis (fix #11) corta el whipsaw alrededor de la SMA.
- * - Frecuencia bajísima → costes irrelevantes.
- * - Sin TP/SL fijo: la SMA200 ES el stop. La salida la dicta la señal.
- * - Idempotente: aunque el cron lo invoque cada 15m, solo opera cuando la señal diaria
- *   (sobre velas CERRADAS) cambia. Entre cierres diarios no hace nada.
+ * Lógica in-or-out por moneda: invertido si cierre DIARIO > SMA·(1+band), cash si < SMA·(1-band).
+ * - Frecuencia bajísima → costes irrelevantes. Sin TP/SL fijo: la SMA ES el stop.
+ * - Idempotente intra-día: solo opera cuando la señal diaria (velas CERRADAS) cambia.
+ *
+ * ⚠️ Honestidad: el objetivo es PRESERVACIÓN DE CAPITAL / mejor riesgo-ajustado, NO batir a BTC.
+ *    No promover a capital real hasta ≥6-8 trades CERRADOS con PF>1 en live (hoy n=1).
  */
-const SMA_PERIOD = 200;
 const DAILY_INTERVAL = '1d';
 
 export async function runDailyBot() {
   try {
     await _runDailyCycle();
   } catch (error) {
-    console.error('❌ [SMA200-1d] Error en runDailyBot:', error.message);
+    console.error('❌ [SMA-1d] Error en runDailyBot:', error.message);
     try {
-      await telegramService.sendMessage(`⚠️ <b>FALLO BOT SMA200-1d</b>\n<code>${telegramService.escape(error.message)}</code>`);
+      await telegramService.sendMessage(`⚠️ <b>FALLO BOT SMA${SMA_PERIOD}-1d</b>\n<code>${telegramService.escape(error.message)}</code>`);
     } catch (_) { /* noop */ }
   }
 }
 
 async function _runDailyCycle() {
-  console.log('\n📅 [SMA200-1d] Iniciando canal diario (regime-timer)...');
+  console.log(`\n📅 [SMA${SMA_PERIOD}-1d] Iniciando canal diario (regime-timer)...`);
 
   // UNA sola lectura/escritura por ciclo (fix #3/#12)
   const session = await dailyTrader.beginSession();
-  console.log(`📊 [SMA200-1d] Saldo Virtual: ${session.state.balanceUSDC.toFixed(2)} USDC`);
+  console.log(`📊 [SMA${SMA_PERIOD}-1d] Saldo Virtual: ${session.state.balanceUSDC.toFixed(2)} USDC`);
 
-  // Universo: mismo top por volumen que el bot 15m, tras blacklist
-  let symbols = await binance.getTopVolumeSymbols(TOP_COINS_LIMIT + 5);
-  symbols = symbols.filter(s => !isBlacklisted(s)).slice(0, TOP_COINS_LIMIT);
+  // Universo: cesta FIJA de large-caps (no el top-10 volátil) — paridad con el backtest.
+  const symbols = DAILY_BASKET.filter(s => !isBlacklisted(s));
 
+  // Además gestionamos cualquier posición abierta aunque ya no esté en la cesta (se vende normal).
   const openSymbols = Object.keys(session.state.openPositions);
   const monitored = [...new Set([...symbols, ...openSymbols])];
-  console.log(`🔍 [SMA200-1d] Evaluando régimen diario (band ${(SMA_HYSTERESIS_BAND * 100).toFixed(1)}%): ${monitored.join(', ')}`);
+  console.log(`🔍 [SMA${SMA_PERIOD}-1d] Evaluando régimen diario (band ${(SMA_HYSTERESIS_BAND * 100).toFixed(1)}%): ${monitored.join(', ')}`);
 
   for (const symbol of monitored) {
     // Velas DIARIAS. Pedimos SMA_PERIOD+11 y descartamos la última (vela en formación).
     const raw = await binance.getKlines(symbol, DAILY_INTERVAL, SMA_PERIOD + 11);
     const klines = raw.length > 0 ? raw.slice(0, -1) : raw;
+    // Guard de histórico: sin suficientes velas no se puede calcular la SMA → se ignora.
     if (klines.length < SMA_PERIOD + 1) continue;
 
     const closes = klines.map(k => k.close);
@@ -60,14 +63,22 @@ async function _runDailyCycle() {
     const canOpen = symbols.includes(symbol);
 
     if (signal === 'BUY' && !hasPos && canOpen && !isBlacklisted(symbol)) {
-      console.log(`🟢 [SMA200-1d] RÉGIMEN ALCISTA: ${symbol} (close > SMA200) a ${currentPrice}`);
-      dailyTrader.applyBuy(session, symbol, currentPrice, { regimeMode: true, smaPeriod: SMA_PERIOD });
+      // Vol-targeting por-canal (paridad con el engine: frac=positionSizePct·w, 0 si w<=minWeight).
+      const w = computeVolTargetWeight(closes, { ...VOLTARGET, periodsPerYear: 365 });
+      let frac = RISK.positionSizePct * w;
+      if (w <= (VOLTARGET.minWeight ?? 0)) frac = 0;
+      if (frac > 0) {
+        console.log(`🟢 [SMA${SMA_PERIOD}-1d] RÉGIMEN ALCISTA: ${symbol} (close > SMA${SMA_PERIOD}) a ${currentPrice} (size ${(frac * 100).toFixed(0)}%)`);
+        dailyTrader.applyBuy(session, symbol, currentPrice, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
+      } else {
+        console.log(`⚪ [SMA${SMA_PERIOD}-1d] ${symbol} alcista pero vol-target → peso 0 (régimen demasiado volátil)`);
+      }
     } else if (signal === 'SELL' && hasPos) {
-      console.log(`🔴 [SMA200-1d] RÉGIMEN BAJISTA: ${symbol} (close < SMA200) → cash a ${currentPrice}`);
+      console.log(`🔴 [SMA${SMA_PERIOD}-1d] RÉGIMEN BAJISTA: ${symbol} (close < SMA${SMA_PERIOD}) → cash a ${currentPrice}`);
       dailyTrader.applySell(session, symbol, currentPrice, 'SIGNAL');
     }
   }
 
   await dailyTrader.commitSession(session);
-  console.log('✅ [SMA200-1d] Ciclo diario terminado.');
+  console.log(`✅ [SMA${SMA_PERIOD}-1d] Ciclo diario terminado.`);
 }

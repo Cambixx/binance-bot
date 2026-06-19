@@ -20,6 +20,16 @@ export function isBlacklisted(symbol) {
 // ─────────────────────────── Estrategia ───────────────────────────
 export const INTERVAL = '15m';
 export const TOP_COINS_LIMIT = 10;
+
+// Canal diario (regime-timer). Periodo SMA: 150 tras la auditoría 2026-06-19 — es la ÚNICA
+// longitud con holdout PF>1 (degradación monótona hacia 250 → plateau, no overfit; SMA150
+// "Robusto" en walk-forward vs SMA200 "Inconsistente"). Fuente única (live + backtest).
+export const SMA_PERIOD = 150;
+// Cesta FIJA de large-caps para el canal diario (auditoría 2026-06-19): el top-10 por volumen
+// de HOY mete mid-caps volátiles sin histórico (ASTER/XPL: 2-158 velas → imposibles para una
+// SMA larga) y sesgo de supervivencia. Esto es de-risking/paridad con el backtest, no mejora
+// de rendimiento. Mismo universo que DEFAULT_BASKET de backtest.js.
+export const DAILY_BASKET = ['BTCUSDC', 'ETHUSDC', 'SOLUSDC', 'XRPUSDC', 'LINKUSDC', 'AVAXUSDC', 'DOTUSDC', 'LTCUSDC'];
 // Ventana de velas CERRADAS que ve la estrategia 15m. Fuente única para garantizar
 // paridad EXACTA del último valor de EMA/ADX/MFI/CHOP entre live y backtest (auditoría #10:
 // los indicadores recursivos dependen de cuántas velas se les pasan).

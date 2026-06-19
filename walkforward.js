@@ -13,7 +13,7 @@
  */
 import fs from 'fs';
 import BacktestEngine, { strategyName } from './backtestEngine.js';
-import { BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET } from './config.js';
+import { BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD } from './config.js';
 
 const args = process.argv.slice(2);
 const getNum = (p, d) => { const a = args.find(x => x.startsWith(p)); return a ? parseFloat(a.split('=')[1]) : d; };
@@ -38,7 +38,10 @@ SYMBOLS = SYMBOLS.filter(s => !BLACKLIST.some(b => s.includes(b)));
 
 function buildRegimeOpts() {
   const ro = { ...STRATEGY_OPTS };
-  if (strategyVersion === 'SMA200') ro.band = getNum('--band=', SMA_HYSTERESIS_BAND * 100) / 100;
+  if (strategyVersion === 'SMA200') {
+    ro.smaPeriod = getNum('--sma=', SMA_PERIOD);              // default = config (paridad live)
+    ro.band = getNum('--band=', SMA_HYSTERESIS_BAND * 100) / 100;
+  }
   return ro;
 }
 
@@ -59,8 +62,12 @@ async function main() {
   const foldLen = span / FOLDS;
 
   const regimeOpts = buildRegimeOpts();
-  const volTarget = args.includes('--voltarget') ? { ...VOLTARGET, enabled: true } : null;
-  const engineExtra = isDaily ? { bufferSize: 260, minCandles: 210 } : {};
+  // Vol-target ON por defecto en el canal diario SMA (paridad con el live); --no-voltarget lo apaga.
+  const volTargetOn = args.includes('--voltarget') || (strategyVersion === 'SMA200' && !args.includes('--no-voltarget'));
+  const volTarget = volTargetOn ? { ...VOLTARGET, enabled: true } : null;
+  // Buffer escalado con el periodo SMA (no hardcode 260/210 → soporta SMA150).
+  const sp = Math.max(regimeOpts.smaPeriod || 200, regimeOpts.entryLen || 0);
+  const engineExtra = isDaily ? { bufferSize: sp + 60, minCandles: sp + 10 } : {};
 
   // 3. Walk-forward de VENTANA ANCLADA EXPANSIVA: para cada fold i, el dataset incluye TODO el
   //    histórico desde tMin hasta el fin del fold (warmup completo para indicadores de lookback

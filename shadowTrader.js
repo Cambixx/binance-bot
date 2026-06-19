@@ -302,8 +302,9 @@ class ShadowTrader {
 // Canal 15m (V4C-COMBO) — cartera por defecto, compatible con el código existente
 export default new ShadowTrader();
 
-// Canal diario (SMA200 regime-timer) — cartera independiente para correr en paralelo
-export const dailyTrader = new ShadowTrader({ storeKey: 'bot_state_daily_v1', label: 'SMA200-1d' });
+// Canal diario (SMA regime-timer, SMA150 tras auditoría 2026-06-19) — cartera independiente.
+// storeKey se mantiene 'bot_state_daily_v1' para conservar el estado live existente.
+export const dailyTrader = new ShadowTrader({ storeKey: 'bot_state_daily_v1', label: 'SMA150-1d' });
 
 // Canal de rotación cross-sectional + dual-momentum (investigación P3+P4) — cartera independiente
 export const rotationTrader = new ShadowTrader({ storeKey: 'bot_state_rotation_v1', label: 'ROT-dual-mom' });

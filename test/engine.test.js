@@ -13,7 +13,7 @@ function makeDaily(closes, startTime = 1700000000000) {
 
 test('strategyName resuelve todas las versiones (fix #25)', () => {
   assert.equal(strategyName('4C'), 'V4-C (V3+RegimeGate)');
-  assert.equal(strategyName('SMA200'), 'SMA200 (Faber regime, diaria)');
+  assert.equal(strategyName('SMA200'), 'SMA regime (Faber, diaria)');
   assert.equal(strategyName('DONCHIAN'), 'Donchian 55/20 (diaria)');
   assert.notEqual(strategyName('4C'), 'V3 (ADX+Trailing)'); // ya NO cae al label de V3 (el bug)
 });

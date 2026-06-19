@@ -2,7 +2,7 @@ import fs from 'fs';
 import BacktestEngine, { strategyName } from './backtestEngine.js';
 import binance from './binanceService.js';
 import { exec } from 'child_process';
-import { BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET } from './config.js';
+import { BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD } from './config.js';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -103,8 +103,10 @@ async function main() {
   const stMultArg = args.find(a => a.startsWith('--st-mult='));
   const stPeriodArg = args.find(a => a.startsWith('--st-period='));
   if (regimeArg) regimeOpts.useRegime = regimeArg.split('=')[1] !== 'off';
+  // Periodo SMA del canal diario: default = config.SMA_PERIOD (150) para PARIDAD con el live.
   if (smaArg) regimeOpts.smaPeriod = parseInt(smaArg.split('=')[1]);
-  // Banda de histéresis para SMA200 (paridad con el bot live). --band en % (ej: --band=1).
+  else if (strategyVersion === 'SMA200') regimeOpts.smaPeriod = SMA_PERIOD;
+  // Banda de histéresis para SMA (paridad con el bot live). --band en % (ej: --band=1).
   const bandArg = args.find(a => a.startsWith('--band='));
   if (strategyVersion === 'SMA200') {
     regimeOpts.band = bandArg ? parseFloat(bandArg.split('=')[1]) / 100 : SMA_HYSTERESIS_BAND;
@@ -133,10 +135,20 @@ async function main() {
     feePct,
     slippagePct
   };
-  // La familia diaria necesita ventana grande (SMA200 / canal 55) → buffer > 220
-  if (isDaily) { engineOpts.bufferSize = 260; engineOpts.minCandles = 210; }
-  // Vol-targeting opcional (--voltarget activa el sizing dinámico de config.VOLTARGET)
-  if (args.includes('--voltarget')) engineOpts.volTarget = { ...VOLTARGET, enabled: true };
+  // La familia diaria necesita ventana grande; el buffer ESCALA con el periodo (fix auditoría:
+  // antes 260/210 hardcodeado no escalaba con --sma → SMA150 arrastraba warm-up de SMA250).
+  if (isDaily) {
+    const sp = Math.max(regimeOpts.smaPeriod || 200, regimeOpts.entryLen || 0);
+    engineOpts.bufferSize = sp + 60;
+    engineOpts.minCandles = sp + 10;
+  }
+  // Vol-targeting: por defecto ON en el canal diario SMA (PARIDAD con el live, que lo cablea
+  // por-canal); --no-voltarget lo desactiva. Para otras estrategias, opt-in con --voltarget.
+  if (strategyVersion === 'SMA200' && !args.includes('--no-voltarget')) {
+    engineOpts.volTarget = { ...VOLTARGET, enabled: true };
+  } else if (args.includes('--voltarget')) {
+    engineOpts.volTarget = { ...VOLTARGET, enabled: true };
+  }
   if (trailDistArg) engineOpts.trailingDistance = parseFloat(trailDistArg.split('=')[1]);
   if (trailActArg) engineOpts.trailingActivation = parseFloat(trailActArg.split('=')[1]);
   if (slArg) engineOpts.stopLossPct = parseFloat(slArg.split('=')[1]);

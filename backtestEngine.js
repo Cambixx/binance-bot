@@ -17,7 +17,7 @@ export const STRATEGY_NAMES = {
   1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)',
   '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)',
   '5': 'V5 (Trend-rider)', '6': 'V6 (Adaptive SuperTrend)',
-  'SMA200': 'SMA200 (Faber regime, diaria)', 'STDAY': 'SuperTrend diario', 'DONCHIAN': 'Donchian 55/20 (diaria)',
+  'SMA200': 'SMA regime (Faber, diaria)', 'STDAY': 'SuperTrend diario', 'DONCHIAN': 'Donchian 55/20 (diaria)',
 };
 
 export function strategyName(v) {

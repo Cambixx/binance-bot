@@ -105,3 +105,45 @@ trailing del audit), DD per-bar, profitFactor=∞, vol-target, rotación, y toda
 3. Correr `npm run walkforward -- --sma200` y `npm run validate -- --sma200 --permute` para confirmar
    el edge de la familia diaria OOS antes de darle peso real.
 4. (Opcional) Activar el canal de rotación en shadow (`ROTATION_ENABLED=true`) y comparar 1-2 meses.
+
+---
+
+## 6. Auditoría LIVE de los 3 canales (2026-06-19)
+
+Segunda auditoría multi-agente tras observar el bot en vivo varios días (el usuario reportó que
+SMA200-1d "iba bien"). Cada ajuste validado con backtests frescos y **verificación adversarial OOS**.
+
+### Hallazgo honesto de fondo
+Ningún canal gana OOS en **retorno**. El "positivo" del diario era **P&L no realizado** (1 trade
+cerrado, y fue pérdida: ASTER −46/−11%). V4C sangra por stop-losses (4/5 trades). ROT está en cash.
+
+### Ajustes aplicados — 📅 SMA150-1d (canal del usuario)
+| Cambio | Antes → Después | Efecto OOS (36m, costes 0.30%) |
+|---|---|---|
+| Periodo SMA | 200 → **150** | única longitud con holdout PF>1; plateau monótono (no overfit) |
+| Sizing | geométrico → **vol-targeting por-canal** | holdout PF 0.80→0.97, MaxDD 25.8→21.9% |
+| Universo | top-10 por volumen → **cesta fija large-caps** | de-risking/paridad (quita mid-caps sin histórico) |
+| **Combinado** | — | **Calmar 0.31→0.61, MaxDD −35.9%→−27.9%, holdout PF 0.80→1.55** |
+
+Vol-targeting cableado **por-canal** en `dailyBot.js` (NO `VOLTARGET.enabled` global, que afectaría a
+V4C/ROT). `SMA_PERIOD`/`DAILY_BASKET` en `config.js`. `backtest.js`: SMA period default = config,
+vol-target ON por defecto en el canal diario, buffer escalado con el periodo → paridad live↔backtest.
+
+**Rechazados (empeoran OOS):** sizing equiponderado equity/N, banda de histéresis 1%, SMA250.
+
+### 📡 V4C-15m → DEPRECADO a observación
+Sin edge ni bruto neto de costes (12m holdout PF 0.73; gross ~PF 1.0). No hay bug ni alfa que
+rescatar. Se mantiene corriendo en shadow solo para comparación; **no asignar capital real**. No se
+liquidan de golpe las posiciones abiertas (terminan su gestión vía `exits.js`).
+
+### 🔄 ROT-dual-mom → confirmado, sin cambios
+Estar 100% en cash es la salida diseñada de los gates (momentum absoluto + BTC), no un fallo.
+
+### Riesgo sobre el estado LIVE (verificado)
+Ningún cambio rompe las posiciones abiertas: `sizeFraction` solo afecta a nuevas entradas; la lógica
+SELL corre sobre `openSymbols ∪ symbols`, así que las posiciones en mid-caps fuera de la nueva cesta
+**se siguen gestionando y pueden venderse**; solo se bloquean NUEVAS aperturas fuera de `DAILY_BASKET`.
+
+### Gate de promoción a capital real (pendiente de datos)
+No mover el diario a real hasta ver **≥6-8 trades CERRADOS con PF>1** en live. Reportar siempre por
+`realizedPnLUSDC`, nunca `totalProfitUSDC` (el latente es surf de toro, no edge).

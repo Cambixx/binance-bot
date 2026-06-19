@@ -15,7 +15,7 @@ import {
   bootstrapTradeCI, deflatedSharpe, blockBootstrapReturns, pricesFromLogReturns,
   makeRng, mean, std, skewness, kurtosis,
 } from './validation.js';
-import { BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET } from './config.js';
+import { BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD } from './config.js';
 
 const args = process.argv.slice(2);
 const getNum = (p, d) => { const a = args.find(x => x.startsWith(p)); return a ? parseFloat(a.split('=')[1]) : d; };
@@ -40,10 +40,18 @@ SYMBOLS = SYMBOLS.filter(s => !BLACKLIST.some(b => s.includes(b)));
 
 function regimeOpts() {
   const ro = { ...STRATEGY_OPTS };
-  if (strategyVersion === 'SMA200') ro.band = getNum('--band=', SMA_HYSTERESIS_BAND * 100) / 100;
+  if (strategyVersion === 'SMA200') {
+    ro.smaPeriod = getNum('--sma=', SMA_PERIOD);             // default = config (paridad live)
+    ro.band = getNum('--band=', SMA_HYSTERESIS_BAND * 100) / 100;
+  }
   return ro;
 }
-function engineExtra() { return isDaily ? { bufferSize: 260, minCandles: 210 } : {}; }
+function engineExtra() {
+  if (!isDaily) return {};
+  const ro = regimeOpts();
+  const sp = Math.max(ro.smaPeriod || 200, ro.entryLen || 0);
+  return { bufferSize: sp + 60, minCandles: sp + 10 };
+}
 
 function perPeriodSharpeFromEquity(equityCurve) {
   const pts = (equityCurve || []).filter(p => p.equity > 0);
@@ -65,7 +73,9 @@ async function main() {
   const dataBySymbol = {};
   for (const s of fetcher.symbols) dataBySymbol[s] = await fetcher.fetchHistoricalData(s);
 
-  const volTarget = args.includes('--voltarget') ? { ...VOLTARGET, enabled: true } : null;
+  // Vol-target ON por defecto en el canal diario SMA (paridad live); --no-voltarget lo apaga.
+  const volTargetOn = args.includes('--voltarget') || (strategyVersion === 'SMA200' && !args.includes('--no-voltarget'));
+  const volTarget = volTargetOn ? { ...VOLTARGET, enabled: true } : null;
   const baseOpts = {
     symbols: [...SYMBOLS], months: MONTHS, interval, strategyVersion, exitMode,
     regimeOpts: regimeOpts(), volTarget, oosSplitRatio: 0.7, ...engineExtra(),
