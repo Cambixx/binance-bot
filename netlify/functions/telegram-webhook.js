@@ -54,7 +54,7 @@ export default async (req) => {
 
       const blocks = [
         await channelBlock(shadowTrader, '📡 V4C-15m (señales)'),
-        await channelBlock(dailyTrader, '📅 SMA200-1d (regime-timer)'),
+        await channelBlock(dailyTrader, '📅 SMA150-1d (regime-timer)'),
       ];
       // Solo mostrar la rotación si el canal está activo
       if (process.env.ROTATION_ENABLED === 'true') {
