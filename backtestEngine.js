@@ -195,6 +195,8 @@ class BacktestEngine {
     // de la cesta. Solo se computa si BTC está en el universo.
     const btcSym = Object.keys(dataBySymbol).find(s => s.includes('BTC'));
     this.btcHold = btcSym ? this.computeBuyHold({ [btcSym]: dataBySymbol[btcSym] }) : null;
+    // Serie del benchmark equiponderado para superponer en la curva de equity del reporte
+    this.benchmarkSeries = this.computeBuyHoldSeries(dataBySymbol);
 
     // Buffers OHLCV por símbolo (V3 necesita high, low, volume además de close)
     const candleBuffers = {};
@@ -517,6 +519,7 @@ class BacktestEngine {
     const phase = (this.splitTime && time >= this.splitTime) ? 'holdout' : 'train';
     this.state.tradeHistory.push({
       symbol,
+      side: pos.side || 'long',
       buyPrice: pos.buyPrice,
       sellPrice: price,
       profit: parseFloat(profit.toFixed(2)),
@@ -560,6 +563,45 @@ class BacktestEngine {
     }
     const roi = firstVal ? (lastVal / firstVal - 1) * 100 : 0;
     return { roi: parseFloat(roi.toFixed(2)), maxDrawdown: parseFloat(maxDD.toFixed(2)) };
+  }
+
+  // Serie temporal del índice buy&hold equiponderado (normalizado al primer close = 1) sobre TODO
+  // el periodo. Para superponer el benchmark en la curva de equity del reporte HTML.
+  computeBuyHoldSeries(dataBySymbol) {
+    const syms = Object.keys(dataBySymbol).filter(s => (dataBySymbol[s] || []).length > 0);
+    if (syms.length === 0) return [];
+    const norm = {};
+    syms.forEach(s => {
+      const d = dataBySymbol[s];
+      const first = d[0].close;
+      const m = new Map();
+      d.forEach(k => m.set(k.time, k.close / first));
+      norm[s] = m;
+    });
+    const times = [...new Set(syms.flatMap(s => [...norm[s].keys()]))].sort((a, b) => a - b);
+    const series = [];
+    for (const t of times) {
+      let sum = 0, cnt = 0;
+      for (const s of syms) { const v = norm[s].get(t); if (v !== undefined) { sum += v; cnt++; } }
+      if (cnt > 0) series.push({ time: t, val: sum / cnt });
+    }
+    return series;
+  }
+
+  // Muestrea el índice benchmark en los timestamps de la curva de equity (último val ≤ time),
+  // escalado a initialBalance → curva comparable para el plot.
+  sampleBenchmarkCurve(equityCurve) {
+    const series = this.benchmarkSeries || [];
+    if (series.length === 0) return [];
+    const base = series[0].val || 1;
+    const out = [];
+    let j = 0;
+    for (const p of equityCurve) {
+      while (j + 1 < series.length && series[j + 1].time <= p.time) j++;
+      const val = series[j] ? series[j].val : base;
+      out.push({ time: p.time, equity: parseFloat((this.initialBalance * (val / base)).toFixed(2)) });
+    }
+    return out;
   }
 
   // Equity total (cash + posiciones valoradas a mercado) en este instante. Side-aware:
@@ -780,6 +822,8 @@ class BacktestEngine {
         },
         buyHold: this.buyHold || null,
         btcHold: this.btcHold || null,
+        longShort: this.longShort || false,
+        splitTime: this.splitTime ? new Date(this.splitTime).toISOString() : null,
         dataEndTime: this.lastEventTime ? new Date(this.lastEventTime).toISOString() : null,
         ...fullMetrics
       },
@@ -787,6 +831,7 @@ class BacktestEngine {
       holdoutSummary: holdoutMetrics,
       trades: this.state.tradeHistory,
       equityCurve: this.state.equityCurve,
+      benchmarkCurve: this.sampleBenchmarkCurve(this.state.equityCurve),
       drawdownCurve
     };
   }

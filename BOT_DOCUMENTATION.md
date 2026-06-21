@@ -149,101 +149,69 @@ El proyecto cuenta con un motor de simulación profesional (`backtestEngine.js`)
 *   Modo de salida configurable: `fixed` (TP/SL/trail %) o `atr` (Chandelier + SL en múltiplos de ATR + opcional toma parcial).
 *   Filtros de régimen parametrizables vía CLI.
 
-### 3.1 Cómo ejecutar Backtests
+### 3.1 ⭐ Comandos que SÍ usas hoy (canales en producción)
 
-#### Comandos rápidos
-| Comando | Qué hace |
-|---|---|
-| `npm run backtest` | Corre la estrategia productiva **V4C-COMBO** sobre los últimos 3 meses con el top dinámico de Binance (paridad con `bot.js`). |
-| `npm run backtest -- --v3` | Compara contra el baseline V3 (regresión). |
-| `npm run backtest -- --v2` | Compara contra V2 (EMA confirmada). |
-| `npm run backtest -- --v1` | Compara contra V1 (original sin filtros de tendencia). |
-| `npm run backtest -- --v4a` | Variante Supertrend + Chandelier (modo `atr` automático). |
-| `npm run backtest -- --v4b` | Variante V3 entries + ATR exits (modo `atr` automático). |
-| `npm run backtest -- --v4c` | V4-C explícito (alias del default). |
-
-#### Flags universales
-
-**Periodo y universo**
-| Flag | Default | Descripción |
-|---|---|---|
-| `--months=N` | `3` | Cuántos meses de historia simular. |
-| `--symbols=SYM1,SYM2,...` | top dinámico de Binance | Lista explícita de pares. Si se omite, descarga el top de volumen y aplica la blacklist. |
-| `--universe=N` | `10` | Tamaño del top dinámico cuando no se pasa `--symbols`. |
-| `--balance=N` | `5000` | Capital virtual inicial en USDC. |
-| `--oos-split=R` | `0.7` | Ratio train/holdout (0.7 = 70% train, 30% holdout). |
-
-**Estrategia y parámetros V4-C**
-| Flag | Default | Descripción |
-|---|---|---|
-| `--chop-max=N` | `50` | CHOP máximo permitido para entrar (V4-C). Más bajo = más selectivo. |
-| `--bbw-pct=N` | `20` | Percentil BBW mínimo rolling 100 velas (V4-C). Más alto = sólo entornos con vol notable. |
-
-**Gestión de riesgo (modo `fixed` — default para V3 y V4-C)**
-| Flag | Default | Descripción |
-|---|---|---|
-| `--tp=N` | `5.0` | Take Profit fijo (%). |
-| `--sl=N` | `3.0` | Stop Loss fijo (%). |
-| `--trail-act=N` | `1.5` | Beneficio (%) al que se activa el trailing stop. |
-| `--trail-dist=N` | `0.45` | Fracción del peak protegida (0.45 = trailing al 45% del beneficio máximo). |
-
-**Salidas adaptativas (modo `atr` — automático en V4-A y V4-B, manual con `--exit-mode=atr`)**
-| Flag | Default | Descripción |
-|---|---|---|
-| `--exit-mode=MODE` | auto | `fixed` o `atr`. |
-| `--atr-sl=N` | `2.0` | SL = entry − N × ATR(14). |
-| `--atr-trail=N` | `3.0` | Chandelier exit = peak − N × ATR(14). |
-| `--partial-r=N` | `0` (off) | Si >0, vende 50% al alcanzar N × R inicial y mueve el SL a breakeven. |
-
-**Costes de transacción (ver §2.6)**
-| Flag | Default | Descripción |
-|---|---|---|
-| `--fee=N` | `0.1` | Comisión por lado (%). Default desde `config.js`. |
-| `--slippage=N` | `0.05` | Slippage por lado (%). Default desde `config.js`. |
-| `--no-costs` | (off) | Anula fees y slippage → backtest idealizado (para contraste). |
-
-**Salida del reporte**
-| Flag | Default | Descripción |
-|---|---|---|
-| `--output=FILE` | `backtest-results.json` | Nombre del JSON de resultados. Útil para correr varias variantes en paralelo. |
-| `--no-open` | falso | No abrir automáticamente el HTML al terminar (útil en scripts y CI). |
-
-### 3.2 Ejemplos prácticos
+En Mac, el backtest **abre solo** el reporte HTML al terminar (salvo `--no-open`).
 
 ```bash
-# Comparativa rápida: baseline V3 vs V4C-COMBO en 6 meses
-node backtest.js --months=6 --symbols=BTCUSDC,ETHUSDC,SOLUSDC,XRPUSDC --v3 --output=bt-v3.json --no-open
-node backtest.js --months=6 --symbols=BTCUSDC,ETHUSDC,SOLUSDC,XRPUSDC --output=bt-v4c.json --no-open
+# === Canal LONG/SHORT (SMA150-LS) — el nuevo, abre el HTML al terminar ===
+node backtest.js --sma200 --longshort --months=40
 
-# Variante V4-C estricta (sólo regímenes muy claros)
-node backtest.js --v4c --chop-max=40 --bbw-pct=40
+# === Canal LONG-ONLY (SMA150-1d) — el validado ===
+node backtest.js --sma200 --months=40
 
-# Probar trailing más conservador (proteger 60% del peak)
-node backtest.js --v4c --trail-dist=0.60
+# Re-abrir el último reporte sin recalcular
+open backtest-report-output.html
 
-# V4-B con ATR menos agresivo
-node backtest.js --v4b --atr-sl=3 --atr-trail=4
-
-# V4-B con toma parcial a 1×R y SL a breakeven
-node backtest.js --v4b --partial-r=1.0
-
-# Walk-forward manual: train con primer 50%, validar últimos 50%
-node backtest.js --months=6 --oos-split=0.5
+# Validación rigurosa del canal (sin red para los tests; los runners sí descargan datos)
+npm test                                       # 37 tests (incluye cortos y motor long/short)
+npm run walkforward -- --sma200 --longshort    # robustez fold-by-fold (long/short)
+npm run walkforward -- --sma200                # robustez fold-by-fold (long-only)
+npm run validate   -- --sma200 --permute=200   # bootstrap CI + Deflated Sharpe + Monte Carlo
+node sweep.js                                   # barrido de hipótesis + DSR + PBO
 ```
 
-### 3.3 Reporte Visual
-Cada ejecución genera **`backtest-report-output.html`**. Al abrirlo en el navegador, verás:
-*   **Equity Curve:** Gráfica del crecimiento del capital con marca del split OOS.
-*   **Drawdown:** Visualización del riesgo máximo asumido.
-*   **Estadísticas:** Win Rate, Profit Factor, Expectancy, ROI, distribución por motivo de salida y por moneda.
+> El default `--sma200` usa periodo SMA de `config.SMA_PERIOD` (150), la **cesta fija de large-caps**
+> y **vol-targeting ON** → reproduce EXACTAMENTE los canales live. `--longshort` añade la pata corta.
 
-### 3.4 Veredicto OOS automático
-El runner imprime un bloque al final con la comparativa **train vs holdout** y emite alertas si:
-*   🔴 PF < 1 en alguna fase → estrategia no rentable.
+### 3.2 Flags principales
+| Flag | Default | Descripción |
+|---|---|---|
+| `--sma200` | — | Selecciona la estrategia de régimen SMA (periodo = `config.SMA_PERIOD`). |
+| `--longshort` | off | Always-in: en bajista abre **CORTO** en vez de ir a cash. |
+| `--no-voltarget` | (vol-target ON) | Desactiva el vol-targeting del canal SMA. |
+| `--months=N` | `3` (SMA: 36) | Meses de historia a simular. |
+| `--symbols=A,B,..` | cesta fija large-caps | Universo explícito. |
+| `--universe=N` | — | ⚠️ Top-N dinámico de HOY (sesgo de supervivencia; etiquetado en el reporte). |
+| `--band=N` | `0` | Banda de histéresis SMA en % (ej. `--band=1`). |
+| `--sma=N` | `config.SMA_PERIOD` | Periodo SMA explícito. |
+| `--oos-split=R` | `0.7` | Ratio train/holdout. |
+| `--fee=N` / `--slippage=N` | config | Costes por lado (%). `--no-costs` los anula (idealizado). |
+| `--output=FILE` | `backtest-results.json` | JSON de salida. |
+| `--no-open` | off | No abrir el HTML al terminar (scripts/CI). |
+
+*(Siguen disponibles las variantes legacy `--v1/--v2/--v3/--v4a/--v4b/--v4c`, `--donchian`, `--stday`, y los flags de modo `atr` `--tp/--sl/--trail-act/--trail-dist/--atr-sl/--atr-trail/--partial-r` para experimentación; ver `backtest.js`.)*
+
+### 3.3 Reporte Visual enriquecido (`backtest-report-output.html`)
+Al abrirlo en el navegador verás:
+*   **KPIs riesgo-ajustados:** ROI, **Sharpe, Sortino, Calmar**, ret./vol anualizados, Profit Factor (∞ si no hay pérdidas), Max Drawdown, Win Rate, Expectancy.
+*   **Equity Curve** con el **HODL equiponderado superpuesto** (línea punteada gris) y una **línea vertical** que marca el inicio del holdout OOS.
+*   **Benchmarks** lado a lado: estrategia vs HODL equiponderado vs **BTC HODL** (ROI + MaxDD, con indicador ✅/🔻 de si los bate).
+*   **Tabla OOS** train vs holdout (Trades, WR, PF, ROI, Sharpe, MaxDD) + veredicto automático.
+*   **Desglose Long / Short** (trades, WR y P&L por lado) cuando es `--longshort`.
+*   Drawdown, donut de motivos de cierre, rendimiento por moneda, e historial completo de operaciones con su **lado** (LONG/SHORT).
+*   Procedencia: costes round-trip, fecha de fin de datos, ratio del split.
+
+### 3.4 Veredicto OOS automático (consola + HTML)
+*   🔴 PF < 1 en alguna fase → no rentable.
 *   🟡 PF cae > 25% en holdout → posible overfit.
 *   🟡 WR cae > 15pp relativo en holdout.
-*   🟡 MaxDD holdout 50% peor que train.
 *   ✅ Si ninguna alarma se dispara: "Estrategia robusta".
+
+### 3.5 Validación rigurosa (anti-overfitting)
+*   **`npm run walkforward`** — ventana anclada expansiva; reporta la **distribución** de ROI/Sharpe/PF/MaxDD por fold (no un único número) y un veredicto de robustez entre regímenes.
+*   **`npm run validate`** — bootstrap de trades (IC del ROI, prob. de pérdida), **Deflated Sharpe** (corrige multiple-testing) y **Monte Carlo de permutación** (`--permute=N`, p-value vs azar).
+*   **`node sweep.js`** — barrido de hipótesis con costes + OOS + **Deflated Sharpe y PBO/CSCV** (probabilidad de overfitting).
 
 ---
 
