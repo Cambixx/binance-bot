@@ -1,4 +1,4 @@
-import shadowTrader, { dailyTrader, rotationTrader } from '../../shadowTrader.js';
+import { dailyTrader, rotationTrader, longShortTrader } from '../../shadowTrader.js';
 import telegramService from '../../telegramService.js';
 import binance from '../../binanceService.js';
 
@@ -53,9 +53,12 @@ export default async (req) => {
       };
 
       const blocks = [
-        await channelBlock(shadowTrader, '📡 V4C-15m (señales)'),
-        await channelBlock(dailyTrader, '📅 SMA150-1d (regime-timer)'),
+        await channelBlock(dailyTrader, '📅 SMA150-1d (long-only)'),
       ];
+      // Canal long/short (default ON; kill-switch LONGSHORT_ENABLED=false)
+      if (process.env.LONGSHORT_ENABLED !== 'false') {
+        blocks.push(await channelBlock(longShortTrader, '↕️ SMA150-LS (long/short)'));
+      }
       // Solo mostrar la rotación si el canal está activo
       if (process.env.ROTATION_ENABLED === 'true') {
         blocks.push(await channelBlock(rotationTrader, '🔄 ROT-dual-mom (experimental)'));

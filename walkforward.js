@@ -65,6 +65,7 @@ async function main() {
   // Vol-target ON por defecto en el canal diario SMA (paridad con el live); --no-voltarget lo apaga.
   const volTargetOn = args.includes('--voltarget') || (strategyVersion === 'SMA200' && !args.includes('--no-voltarget'));
   const volTarget = volTargetOn ? { ...VOLTARGET, enabled: true } : null;
+  const longShort = args.includes('--longshort'); // always-in long/short (SELL abre corto)
   // Buffer escalado con el periodo SMA (no hardcode 260/210 → soporta SMA150).
   const sp = Math.max(regimeOpts.smaPeriod || 200, regimeOpts.entryLen || 0);
   const engineExtra = isDaily ? { bufferSize: sp + 60, minCandles: sp + 10 } : {};
@@ -88,7 +89,7 @@ async function main() {
     try {
       const engine = new BacktestEngine({
         symbols: [...SYMBOLS], months: MONTHS, interval, strategyVersion,
-        exitMode, regimeOpts, volTarget, dataBySymbol: anchored, oosSplitRatio: oosRatio, ...engineExtra,
+        exitMode, regimeOpts, volTarget, longShort, dataBySymbol: anchored, oosSplitRatio: oosRatio, ...engineExtra,
       });
       r = await engine.run();
     } finally { console.log = orig; }

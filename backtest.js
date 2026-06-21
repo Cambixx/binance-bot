@@ -142,6 +142,8 @@ async function main() {
     engineOpts.bufferSize = sp + 60;
     engineOpts.minCandles = sp + 10;
   }
+  // Modo LONG/SHORT (always-in): SELL abre corto en vez de ir a cash. Solo con exitMode 'signal'.
+  if (args.includes('--longshort')) engineOpts.longShort = true;
   // Vol-targeting: por defecto ON en el canal diario SMA (PARIDAD con el live, que lo cablea
   // por-canal); --no-voltarget lo desactiva. Para otras estrategias, opt-in con --voltarget.
   if (strategyVersion === 'SMA200' && !args.includes('--no-voltarget')) {

@@ -60,6 +60,10 @@ class BacktestEngine {
     // Vol-targeting (sizing dinámico). null/disabled = sizing fijo histórico (investigación §2.1).
     this.volTarget = options.volTarget || null;
 
+    // Modo LONG/SHORT (solo con exitMode 'signal'): always-in-the-market. BUY = largo (cierra
+    // corto si lo hay), SELL = corto (cierra largo si lo hay). Para el canal SMA150 long/short.
+    this.longShort = options.longShort || false;
+
     // Datos pre-descargados (sweep.js reutiliza una sola descarga entre combos)
     this.dataBySymbol = options.dataBySymbol || null;
 
@@ -249,6 +253,22 @@ class BacktestEngine {
       const hasPosition = !!this.state.openPositions[symbol];
       const isOnCooldown = this.state.cooldowns[symbol] && this.state.cooldowns[symbol] > 0;
 
+      if (this.longShort && this.exitMode === 'signal') {
+        // ALWAYS-IN long/short: la señal dicta el lado. BUY → largo (cierra corto previo);
+        // SELL → corto (cierra largo previo). Flip en el cruce de la SMA.
+        const pos = this.state.openPositions[symbol];
+        if (signal === 'BUY') {
+          if (pos && pos.side === 'short') this.executeShortClose(symbol, close, time, 'SIGNAL');
+          if (!this.state.openPositions[symbol] && this.canOpenPosition(currentPrices)) this.executeBuy(symbol, close, time, null, buf);
+        } else if (signal === 'SELL') {
+          if (pos && pos.side === 'long') this.executeSell(symbol, close, time, 'SIGNAL');
+          if (!this.state.openPositions[symbol] && this.canOpenPosition(currentPrices)) this.executeShortOpen(symbol, close, time, buf);
+        }
+        this.trackDrawdown(time, currentPrices);
+        this.recordEquity(time, currentPrices);
+        continue;
+      }
+
       // Lógica de Compra (con caps de cartera, fix #26)
       if (signal === 'BUY' && !hasPosition && !isOnCooldown && this.canOpenPosition(currentPrices)) {
         // Si modo ATR, anclar SL/peak iniciales con ATR del momento
@@ -288,7 +308,11 @@ class BacktestEngine {
     const closeTime = this.lastEventTime || Date.now();
     for (const symbol in this.state.openPositions) {
       if (currentPrices[symbol]) {
-        this.executeSell(symbol, currentPrices[symbol], closeTime, 'END_OF_BACKTEST');
+        if (this.state.openPositions[symbol].side === 'short') {
+          this.executeShortClose(symbol, currentPrices[symbol], closeTime, 'END_OF_BACKTEST');
+        } else {
+          this.executeSell(symbol, currentPrices[symbol], closeTime, 'END_OF_BACKTEST');
+        }
       }
     }
     // Punto final de equity (sin throttle) para que la curva acabe en finalBalance
@@ -343,6 +367,7 @@ class BacktestEngine {
 
     this.state.balance -= investAmount;
     this.state.openPositions[symbol] = {
+      side: 'long',
       amount: amountCrypto,
       buyPrice: price,        // precio de mercado RAW (base de los umbrales TP/SL/trailing)
       invested: investAmount, // capital comprometido (incluye fee de entrada)
@@ -355,6 +380,46 @@ class BacktestEngine {
       atrSL: entryATR ? price - this.atrSLMult * entryATR : null,
       partialTaken: false
     };
+  }
+
+  // Abre un CORTO (solo modo long/short, exitMode 'signal'). Modelo de margen: se reserva
+  // `invested` del balance; el P&L se realiza al cubrir. amount = unidades nocionales (precio raw).
+  executeShortOpen(symbol, price, time, buf = null) {
+    const sizeFrac = this.computeSizeFraction(buf);
+    if (sizeFrac <= 0) return;
+    const invested = this.state.balance * sizeFrac; // margen reservado
+    const amount = invested / price;
+    this.state.balance -= invested;
+    this.state.openPositions[symbol] = {
+      side: 'short',
+      amount,
+      buyPrice: price,        // = entryPrice (nombre compartido para reporting/peak)
+      entryPrice: price,
+      invested,
+      time: new Date(time).toISOString(),
+      peakPrice: price,
+    };
+  }
+
+  // Cierra un CORTO (buy-to-cover). P&L corto = amount·[entry·(1−slip−fee) − price·(1+slip+fee)].
+  executeShortClose(symbol, price, time, reason) {
+    const pos = this.state.openPositions[symbol];
+    if (!pos || pos.side !== 'short') return;
+    const entry = pos.entryPrice;
+    const slip = this.slippagePct, fee = this.feePct;
+    const proceedsEntry = pos.amount * entry * (1 - slip) - pos.amount * entry * fee; // vender al abrir
+    const costCover = pos.amount * price * (1 + slip) + pos.amount * price * fee;     // comprar al cerrar
+    const profit = proceedsEntry - costCover;
+    const profitPct = (profit / pos.invested) * 100;
+    this.state.balance += pos.invested + profit;
+
+    const phase = (this.splitTime && time >= this.splitTime) ? 'holdout' : 'train';
+    this.state.tradeHistory.push({
+      symbol, side: 'short', buyPrice: entry, sellPrice: price,
+      profit: parseFloat(profit.toFixed(2)), profitPct: parseFloat(profitPct.toFixed(2)),
+      buyTime: pos.time, sellTime: new Date(time).toISOString(), reason, phase,
+    });
+    delete this.state.openPositions[symbol];
   }
 
   getCurrentATR(buf) {
@@ -497,12 +562,18 @@ class BacktestEngine {
     return { roi: parseFloat(roi.toFixed(2)), maxDrawdown: parseFloat(maxDD.toFixed(2)) };
   }
 
-  // Equity total (cash + posiciones valoradas a mercado) en este instante.
+  // Equity total (cash + posiciones valoradas a mercado) en este instante. Side-aware:
+  // largo = amount·mkt; corto = margen + amount·(entry − mkt) (P&L flotante del corto).
   currentEquity(currentPrices) {
     let investedValue = 0;
     for (const s in this.state.openPositions) {
       const pos = this.state.openPositions[s];
-      investedValue += pos.amount * (currentPrices[s] || pos.buyPrice);
+      const mkt = currentPrices[s] || pos.buyPrice;
+      if (pos.side === 'short') {
+        investedValue += pos.invested + pos.amount * (pos.entryPrice - mkt);
+      } else {
+        investedValue += pos.amount * mkt;
+      }
     }
     return this.state.balance + investedValue;
   }

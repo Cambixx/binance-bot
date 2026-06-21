@@ -7,9 +7,10 @@ Este proyecto es un bot de trading automatizado diseñado para operar en Binance
 El bot está construido en Node.js y diseñado para ejecutarse como una **función Serverless** en **Netlify**. Se ejecuta automáticamente cada 15 minutos mediante un Cron Job (`trader-cron.js`).
 
 **Canales shadow en paralelo:** el cron corre carteras virtuales INDEPENDIENTES para comparar enfoques con datos reales:
-- **📡 V4C-15m** (`bot.js` → blob `bot_state_v2`): generador de señales 15m (V4C-COMBO). **DEPRECADO a observación (auditoría 2026-06-19):** sin edge ni bruto neto de costes (sangra por stop-losses). Se mantiene corriendo SOLO para comparación shadow; **no asignarle capital real**. No buscar alfa aquí.
-- **📅 SMA150-1d** (`dailyBot.js` → blob `bot_state_daily_v1`): regime-timer DIARIO (estilo Faber). In-or-out: invertido si cierre diario > SMA150, cash si no. **Config optimizada por riesgo-ajustado OOS (auditoría 2026-06-19):** SMA **150** (no 200), **cesta fija de large-caps** (`DAILY_BASKET`, no el top-10 volátil), **vol-targeting por-canal**. La familia validada (§1.2). Idempotente intra-día.
-- **🔄 ROT-dual-mom** (`rotationBot.js` → blob `bot_state_rotation_v1`): **EXPERIMENTAL**, rotación cross-sectional + dual-momentum. Top-N por retorno trailing 30d + gate de momentum absoluto + gate BTC; si no, cash (estar en cash en bajista es el comportamiento correcto). Se activa con `ROTATION_ENABLED=true`.
+- **📅 SMA150-1d** (`dailyBot.js` → blob `bot_state_daily_v1`): regime-timer DIARIO LONG-ONLY (estilo Faber). In-or-out: invertido si cierre diario > SMA150, **cash** si no. SMA **150**, **cesta fija de large-caps** (`DAILY_BASKET`), **vol-targeting por-canal**. La familia validada (§1.2). Idempotente intra-día.
+- **↕️ SMA150-LS** (`longShortBot.js` → blob `bot_state_ls_v1`): **LONG/SHORT always-in** (reconvierte el hueco del parado V4C-15m, 2026-06-21). Misma señal SMA150 pero en bajista abre **CORTO** en vez de ir a cash; flip en el cruce. Kill-switch `LONGSHORT_ENABLED=false`. ⚠️ El lado corto NO está validado a largo plazo (ver §1.3).
+- **🔄 ROT-dual-mom** (`rotationBot.js` → blob `bot_state_rotation_v1`): **EXPERIMENTAL**, rotación cross-sectional + dual-momentum. Opt-in `ROTATION_ENABLED=true`.
+- **⏹️ V4C-15m** (`bot.js` → blob `bot_state_v2`): **PARADO (2026-06-21)** — sin edge neto de costes. `bot.js` se conserva como referencia pero ya NO se ejecuta; su blob queda congelado.
 
 `/status` en Telegram muestra los canales activos lado a lado.
 
@@ -37,7 +38,30 @@ Tras investigación online consciente de costes, se implementaron estrategias **
 >
 > El `walkforward.js` añadido confirma el matiz: la SMA200 es **inconsistente fold-a-fold en retorno** pero preserva capital en crashes (p.ej. fold 2025-11→2026-06: 0% en cash mientras HODL hizo −44.9%). Correr `npm run walkforward -- --sma200` y `npm run validate -- --sma200 --permute` para el dato vigente.
 
-> **NO es alfa, es reducción de drawdown / preservación de capital** — el objetivo realista y honesto. La decisión de qué canal llevar a real debe basarse en la comparación shadow OOS de los tres canales (`/status`), no en backtests in-sample.
+> **NO es alfa, es reducción de drawdown / preservación de capital** — el objetivo realista y honesto. La decisión de qué canal llevar a real debe basarse en la comparación shadow OOS de los canales (`/status`), no en backtests in-sample.
+
+### 1.3 ↕️ Canal LONG/SHORT (SMA150-LS) — 2026-06-21
+Reconvierte el hueco del parado V4C-15m. Misma señal de régimen SMA150 que el canal diario, pero
+"always-in": en bajista abre **CORTO** en vez de ir a cash (flip largo↔corto en el cruce). El usuario
+opera a mano (corto y largo); el bot le da la señal de lado.
+
+**Validación (walk-forward 40m, cesta fija, costes 0.30%, 6 folds), long/short vs long-only:**
+
+| | Long/short (LS) | Long-only (1d) |
+|---|---|---|
+| ROI mediano por fold | **+14.4%** | +0.8% |
+| Sharpe mediano | **1.06** | 0.02 |
+| Folds ROI>0 | **4/5** | 3/5 |
+| Folds PF≥1 | **5/5** | 4/5 |
+| Fold del crash (HODL −45%) | **+14.3%** (cortos) | −2.4% |
+| Full 40m | ROI +59%, Calmar 0.67, MaxDD −26% | ROI +49%, Calmar 0.61, MaxDD −28% |
+
+> **Hallazgo (honesto):** en esta muestra el long/short batió al long-only de forma consistente entre
+> regímenes, sobre todo capturando el bajista reciente con los cortos. **PERO** es ~1 ciclo de mercado,
+> perfil trend-following (win-rate ~20%, rachas largas de pérdidas pequeñas), y cripto tiene sesgo
+> alcista de fondo → la rentabilidad futura del lado corto NO está garantizada. Además, en real un
+> corto tiene fricciones extra (borrow/funding) no modeladas. Por eso corre en **SHADOW** para
+> observar; ejecución manual. Mismo gate de promoción (§1.2): ≥6-8 cierres con PF>1 antes de fiarse.
 
 ---
 
@@ -233,10 +257,11 @@ El runner imprime un bloque al final con la comparativa **train vs holdout** y e
 *   **`exits.js`:** ⭐ `evaluateFixedExit(pos, price, params)` — lógica de salida TP/SL/Trailing **compartida por el motor y el bot live** (garantiza paridad por construcción; fix auditoría #2).
 *   **`backtestEngine.js`:** Motor. Descarga paginada, cronología unificada, dispatcher por versión, exits `fixed`/`atr`/`signal`, split train/holdout, MaxDD **por-vela**, métricas riesgo-ajustadas (Sharpe/Sortino/Calmar), benchmarks (cesta equiponderada + BTC HODL), vol-targeting opcional y caps. Exporta `STRATEGY_NAMES`/`strategyName`.
 *   **`backtest.js`:** Runner de consola (flags CLI, JSON, HTML).
-*   **`bot.js`:** Canal 15m (V4C-COMBO). Lectura/escritura transaccional (`beginSession`/`commitSession`), salidas vía `exits.js`, cooldown anclado a vela, vol-targeting/caps/gate BTC opcionales, alerta de fallo a Telegram.
-*   **`dailyBot.js`:** Canal diario (SMA200 + banda). Transaccional, idempotente intra-día, alerta de fallo.
+*   **`bot.js`:** Canal 15m (V4C-COMBO) — **PARADO**, conservado como referencia. Transaccional, salidas vía `exits.js`.
+*   **`dailyBot.js`:** Canal diario SMA150 LONG-ONLY. Transaccional, idempotente intra-día, vol-targeting, alerta de fallo.
+*   **`longShortBot.js`:** Canal SMA150 LONG/SHORT always-in (`longShortTrader`, blob `bot_state_ls_v1`). Flip largo↔corto en el cruce de la SMA; `LONGSHORT_ENABLED=false` lo apaga. Ver §1.3.
 *   **`rotationBot.js`:** Canal de rotación cross-sectional + dual-momentum (experimental, `ROTATION_ENABLED`).
-*   **`shadowTrader.js`:** Estado en **Netlify Blobs** con patrón transaccional (`beginSession`/`applyBuy`/`applySell`/`applyUpdatePosition`/`commitSession`). Cada canal su cartera (`storeKey`/`label`). Costes en buy/sell, `profitUSDC` numérico a precisión completa, cooldown anclado a vela, escape HTML, `getStats` con realizado vs latente separados.
+*   **`shadowTrader.js`:** Estado en **Netlify Blobs** con patrón transaccional. **Side-aware** (`applyBuy` largo / `applyShort` corto / `applySell` cierra ambos / `getStats` valora cortos a margen+P&L). Cada canal su cartera (`storeKey`/`label`). Costes en ambos lados, `profitUSDC` numérico, escape HTML.
 *   **`binanceService.js`:** Cliente HTTP con timeout + retry/backoff (429/418), host de datos y host firmado separados.
 *   **`telegramService.js`:** Notificaciones (+ `escape` para HTML).
 *   **`validation.js`:** Estadística de validación (bootstrap CI, block bootstrap, Deflated Sharpe, PBO/CSCV, normal CDF/inv, PRNG determinista).
@@ -275,6 +300,7 @@ Configuradas en el panel de Netlify (ver `.env.example`):
 *   `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`
 *   `TELEGRAM_ENABLED`: "true"
 *   `TELEGRAM_WEBHOOK_SECRET` — secret token del webhook (recomendado; ver §5 de `AUDIT_REPORT.md`). Registra el webhook con `secret_token` y este valor.
+*   `LONGSHORT_ENABLED`: "false" para apagar el canal SMA150-LS (default ON).
 *   `ROTATION_ENABLED`: "true" para activar el canal experimental de rotación.
 
 ---

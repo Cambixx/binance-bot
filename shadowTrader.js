@@ -118,9 +118,17 @@ class ShadowTrader {
       const mkt = currentPrices[key];
       const valuationPrice = (mkt && mkt > 0) ? mkt : pos.buyPrice;
       if (!(mkt && mkt > 0)) pricedAtMarket = false;
-      const value = pos.amount * valuationPrice;
-      investedEquity += value;
-      unrealizedPnL += value - pos.investedUSDC;
+      if (pos.side === 'short') {
+        // Corto: aporta margen + P&L flotante = invested + amount·(entry − mkt).
+        const entry = pos.entryPrice ?? pos.buyPrice;
+        const floatPnL = pos.amount * (entry - valuationPrice);
+        investedEquity += pos.investedUSDC + floatPnL;
+        unrealizedPnL += floatPnL;
+      } else {
+        const value = pos.amount * valuationPrice;
+        investedEquity += value;
+        unrealizedPnL += value - pos.investedUSDC;
+      }
     }
 
     const currentTotalEquity = state.balanceUSDC + investedEquity;
@@ -170,8 +178,10 @@ class ShadowTrader {
 
     state.balanceUSDC -= investAmountUSDC;
     state.openPositions[symbol] = {
+      side: 'long',
       amount: amountCrypto,
       buyPrice: price,        // precio de mercado RAW (base de los umbrales TP/SL/trailing)
+      entryPrice: price,
       peakPrice: price,
       trailingActivated: false,
       trailingSL: 0,          // nivel de trailing PERSISTIDO (fix #2: paridad con el engine)
@@ -209,31 +219,81 @@ class ShadowTrader {
   }
 
   /**
-   * Cierra una posición en la sesión (sin persistir). options:
+   * Abre un CORTO en la sesión (modelo de margen, modo long/short). Reserva `investedUSDC` del
+   * balance; el P&L se realiza al cubrir (en applySell, que es side-aware). amount = unidades
+   * nocionales (precio raw). Mismo modelo de costes que el motor (executeShortOpen/Close).
+   */
+  applyShort(session, symbol, price, options = {}) {
+    const state = session.state;
+    if (state.openPositions[symbol]) {
+      console.log(`[Shadow] Ya tienes una posición abierta en ${symbol}.`);
+      return false;
+    }
+    const sizeFraction = Number(options.sizeFraction ?? RISK.positionSizePct);
+    const marginUSDC = state.balanceUSDC * sizeFraction;
+    if (!(marginUSDC > 0) || !(price > 0)) return false;
+
+    state.balanceUSDC -= marginUSDC;
+    state.openPositions[symbol] = {
+      side: 'short',
+      amount: marginUSDC / price,
+      buyPrice: price,
+      entryPrice: price,
+      peakPrice: price,
+      investedUSDC: marginUSDC,
+      timestamp: new Date().toISOString(),
+    };
+
+    const tag = telegramService.escape(symbol.replace('USDC', ''));
+    session.notifications.push(
+      `🚨 <b>SEÑAL DE VENTA EN CORTO (SHORT)</b> · ${telegramService.escape(this.label)}\n\n` +
+      `<b>Moneda:</b> #${tag}\n` +
+      `<b>Precio Entrada (short):</b> ${price.toFixed(4)} USDC\n` +
+      `<b>Tamaño sugerido:</b> ${marginUSDC.toFixed(2)} USDC (${(sizeFraction * 100).toFixed(0)}% del saldo)\n\n` +
+      `📊 <b>Gestión:</b> mantener el corto mientras el cierre diario < SMA${options.smaPeriod || 150}; cubrir/cerrar y pasar a largo si lo supera (sin TP/SL fijo).\n\n` +
+      `<i>Señal probabilística (lado corto NO validado a largo plazo). Neto de ~0.30% de costes.</i>`
+    );
+    console.log(`🟠 [${this.label}] SHORT ${symbol} a ${price} USDC (size ${(sizeFraction * 100).toFixed(0)}%)`);
+    return true;
+  }
+
+  /**
+   * Cierra una posición en la sesión (sin persistir). SIDE-AWARE: cierra largos (vender) o
+   * cortos (cubrir) según position.side. options:
    *  - cooldownMs: duración del cooldown post-SL (default RISK.cooldownCandles × 15m)
    *  - candleTime: timestamp de la vela de la señal (ancla del cooldown, fix #30).
-   *    Usar el openTime de la última vela CERRADA para que el cooldown cuente VELAS, no
-   *    wall-clock (robusto a jitter del cron). Default Date.now().
    */
   applySell(session, symbol, price, reason = 'SIGNAL', options = {}) {
     const state = session.state;
     const position = state.openPositions[symbol];
     if (!position) return false;
 
-    // Costes de salida (paridad backtest): slippage en el precio + fee sobre el retorno bruto.
-    const fillPrice = price * (1 - COSTS.slippagePct);
-    const grossReturn = position.amount * fillPrice;
-    const sellFee = grossReturn * COSTS.feePct;
-    const returnUSDC = grossReturn - sellFee;
-    const profitUSDC = returnUSDC - position.investedUSDC;
-    const profitPercentage = (profitUSDC / position.investedUSDC) * 100;
-
-    state.balanceUSDC += returnUSDC;
+    let profitUSDC, profitPercentage, returnUSDC;
+    if (position.side === 'short') {
+      // Cubrir corto: P&L = amount·[entry·(1−slip−fee) − price·(1+slip+fee)]. Devuelve margen + P&L.
+      const entry = position.entryPrice ?? position.buyPrice;
+      const proceedsEntry = position.amount * entry * (1 - COSTS.slippagePct) - position.amount * entry * COSTS.feePct;
+      const costCover = position.amount * price * (1 + COSTS.slippagePct) + position.amount * price * COSTS.feePct;
+      profitUSDC = proceedsEntry - costCover;
+      profitPercentage = (profitUSDC / position.investedUSDC) * 100;
+      returnUSDC = position.investedUSDC + profitUSDC; // margen + P&L
+      state.balanceUSDC += returnUSDC;
+    } else {
+      // Vender largo (modelo existente).
+      const fillPrice = price * (1 - COSTS.slippagePct);
+      const grossReturn = position.amount * fillPrice;
+      const sellFee = grossReturn * COSTS.feePct;
+      returnUSDC = grossReturn - sellFee;
+      profitUSDC = returnUSDC - position.investedUSDC;
+      profitPercentage = (profitUSDC / position.investedUSDC) * 100;
+      state.balanceUSDC += returnUSDC;
+    }
 
     // Precisión: guardar profit como Number a precisión completa (fix #29) → realizedPnL
     // reconcilia con el balance hasta epsilon. El formateo se hace al mostrar.
     state.tradeHistory.push({
       symbol,
+      side: position.side || 'long',
       buyPrice: position.buyPrice,
       sellPrice: price,
       amount: position.amount,
@@ -253,12 +313,14 @@ class ShadowTrader {
       state.cooldowns[symbol] = new Date(anchor + cooldownMs).toISOString();
     }
 
+    const isShort = position.side === 'short';
     const icon = profitUSDC >= 0 ? '🎯' : '🛑';
+    const closeWord = isShort ? 'CIERRE DE CORTO (cubrir)' : 'SEÑAL DE CIERRE';
     const motivos = { TAKE_PROFIT: 'Take Profit', STOP_LOSS: 'Stop Loss', TRAILING_STOP: 'Trailing Stop', SIGNAL: 'Señal' };
     const heldH = ((Date.now() - new Date(position.timestamp).getTime()) / 3600000).toFixed(1);
     const tag = telegramService.escape(symbol.replace('USDC', ''));
     session.notifications.push(
-      `${icon} <b>SEÑAL DE CIERRE</b> · ${telegramService.escape(this.label)}\n\n` +
+      `${icon} <b>${closeWord}</b> · ${telegramService.escape(this.label)}\n\n` +
       `<b>Moneda:</b> #${tag}\n` +
       `<b>Entrada → Salida:</b> ${position.buyPrice.toFixed(4)} → ${price.toFixed(4)} USDC\n` +
       `<b>Motivo:</b> ${telegramService.escape(motivos[reason] || reason)}\n` +
@@ -267,7 +329,7 @@ class ShadowTrader {
       `<i>Si replicaste la operación manual, cierra ahora.</i>`
     );
 
-    console.log(`🔴 [${this.label}] SELL ${symbol} a ${price} → ${profitUSDC > 0 ? '+' : ''}${profitUSDC.toFixed(2)} USDC (${profitPercentage.toFixed(2)}%) | saldo ${state.balanceUSDC.toFixed(2)}`);
+    console.log(`🔴 [${this.label}] ${isShort ? 'COVER' : 'SELL'} ${symbol} a ${price} → ${profitUSDC > 0 ? '+' : ''}${profitUSDC.toFixed(2)} USDC (${profitPercentage.toFixed(2)}%) | saldo ${state.balanceUSDC.toFixed(2)}`);
     return true;
   }
 
@@ -308,6 +370,10 @@ export const dailyTrader = new ShadowTrader({ storeKey: 'bot_state_daily_v1', la
 
 // Canal de rotación cross-sectional + dual-momentum (investigación P3+P4) — cartera independiente
 export const rotationTrader = new ShadowTrader({ storeKey: 'bot_state_rotation_v1', label: 'ROT-dual-mom' });
+
+// Canal LONG/SHORT (SMA150 always-in) — reconvierte el hueco que dejó el parado V4C-15m.
+// Cartera NUEVA y limpia (no reutiliza bot_state_v2 para no mezclar el historial viejo de V4C).
+export const longShortTrader = new ShadowTrader({ storeKey: 'bot_state_ls_v1', label: 'SMA150-LS' });
 
 // Exportar la clase por si se quieren más canales en el futuro
 export { ShadowTrader };

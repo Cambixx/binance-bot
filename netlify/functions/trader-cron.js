@@ -1,27 +1,31 @@
-import { runBot } from '../../bot.js';
 import { runDailyBot } from '../../dailyBot.js';
+import { runLongShortBot } from '../../longShortBot.js';
 import { runRotationBot } from '../../rotationBot.js';
 
 /**
  * Netlify Scheduled Function (Netlify Functions v2). Se ejecuta cada 15 minutos.
  *
- * Corre canales shadow INDEPENDIENTES en paralelo (cada uno con su cartera virtual):
- *  - V4C-15m: generador de señales 15m (cartera bot_state_v2)
- *  - SMA200-1d: regime-timer diario (cartera bot_state_daily_v1), idempotente intra-día
- *  - ROT-dual-mom: rotación cross-sectional + dual-momentum (cartera bot_state_rotation_v1),
- *    EXPERIMENTAL — actívalo con env ROTATION_ENABLED=true.
+ * Canales shadow (cada uno con su cartera virtual):
+ *  - SMA150-1d: regime-timer diario LONG-ONLY (cartera bot_state_daily_v1). Validado.
+ *  - SMA150-LS: long/short always-in (cartera bot_state_ls_v1). Misma señal SMA150 pero shortea
+ *    en bajista. Kill-switch: LONGSHORT_ENABLED=false. Reemplaza al parado V4C-15m.
+ *  - ROT-dual-mom: rotación experimental (cartera bot_state_rotation_v1), opt-in ROTATION_ENABLED=true.
  *
- * Cada runX tiene su propio try/catch con alerta a Telegram (fix #4), así un fallo en un canal
- * no tumba a los demás.
+ * ⏹️ V4C-15m PARADO (2026-06-21): sin edge neto de costes. `bot.js` se conserva como referencia
+ *    pero ya NO se ejecuta. Su blob `bot_state_v2` queda congelado.
+ *
+ * Cada runX tiene su propio try/catch con alerta a Telegram, así un fallo en un canal no tumba a otro.
  */
 export default async (req) => {
   console.log('⏰ Invocando trader-cron (Ejecución programada)');
 
-  await runBot();        // Canal 15m (V4C-COMBO)
-  await runDailyBot();   // Canal diario (SMA200 regime-timer)
+  await runDailyBot();   // SMA150-1d (long-only, validado)
 
+  if (process.env.LONGSHORT_ENABLED !== 'false') {
+    await runLongShortBot(); // SMA150-LS (long/short) — default ON
+  }
   if (process.env.ROTATION_ENABLED === 'true') {
-    await runRotationBot(); // Canal de rotación (experimental)
+    await runRotationBot();   // Rotación (experimental) — opt-in
   }
 };
 
