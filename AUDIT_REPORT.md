@@ -147,3 +147,35 @@ SELL corre sobre `openSymbols ∪ symbols`, así que las posiciones en mid-caps 
 ### Gate de promoción a capital real (pendiente de datos)
 No mover el diario a real hasta ver **≥6-8 trades CERRADOS con PF>1** en live. Reportar siempre por
 `realizedPnLUSDC`, nunca `totalProfitUSDC` (el latente es surf de toro, no edge).
+
+---
+
+## 7. Auditoría LIVE 2026-06-26 (con el canal long/short en marcha)
+
+Multi-agente (auditoría de estado/código + investigación de mejoras), cada hallazgo/propuesta
+verificado adversarialmente. Estado live (régimen bajista): SMA150-LS +5.2% latente shorteando la
+caída; SMA150-1d −5.3% por longs mid-cap heredados; ROT en cash; V4C parado/congelado.
+
+### Riesgos REALES confirmados y CORREGIDOS
+| # | Hallazgo | Fix aplicado |
+|---|---|---|
+| 1 (HIGH) | El corto no tenía NINGÚN stop → pérdida no acotada hasta el flip (laggy) de la SMA. El backtest **también** lo sobreestimaba. | **Catastrophe-stop 25%** + cooldown 5d en motor y live (`config.LONGSHORT`, `backtestEngine.js`, `longShortBot.js`). |
+| 2 | Funding/borrow del corto no modelado → edge sesgado al alza. | **`COSTS.fundingDailyShort` 0.03%/día** netado en `executeShortClose` y `shadowTrader.applySell` (paridad). Recorta ~10pp de ROI en backtest (62%→52%). |
+| 3 | Sin cap de exposición en LIVE (7 cortos = ~79%); `canOpenPosition` solo en backtest. | Caps `LONGSHORT.maxExposurePct` 0.85 portados a `longShortBot`/`dailyBot`. |
+| 4 | Margen 1x sin liquidación (balance podía ir negativo). | Acotado por el catastrophe-stop (cierra antes del −100%). |
+| 5 | `telegramService` sin timeout → un POST colgado starvea el cron. | `timeout: 8000` en ambos posts. |
+
+### Calibración honesta (anti-overfit)
+Un barrido de `shortStopPct` mostró 8%→ROI 58% pero 10%→28% y 12%→24% = **no-monotónico = sobreajuste
+a 1 muestra**. Por eso el stop se fija ANCHO (25%, protección de cola, 0 disparos en la muestra), NO
+en el "pico" de 8%. Walk-forward con funding+stop sigue ✅ robusto (ROI mediano por fold 12.4%, 5/5 PF≥1).
+
+### Acciones operativas recomendadas al usuario (sobre el estado live, no automatizadas)
+- **Force-close** las 4 posiciones mid-cap HEREDADAS del canal SMA150-1d (WLD/NEAR/XLM/JTO) que NO
+  están en `DAILY_BASKET` — su única salida es su propia SMA (lag enorme tras un pump). Saneamiento puntual.
+- **Resetear** el blob huérfano del V4C parado: `npx netlify blobs:delete shadow_trading_state bot_state_v2`.
+
+### Experimentos pendientes de validar OOS (NO aplicados)
+Chandelier-stop del corto + estado FLAT (salir a cash en vez de always-in), asimetría de velocidad
+(entrar lento/salir rápido con SMA de salida 20-30), sizing inverse-vol sobre equity. La investigación
+los marca como experimentos (riesgo de whipsaw/overfit) → validar con walk-forward + DSR + PBO antes de live.

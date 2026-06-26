@@ -46,6 +46,11 @@ class BacktestEngine {
     // Costes de transacción (fees + slippage) — netados en cada trade. Ver config.js / auditoría.
     this.feePct = options.feePct ?? COSTS.feePct;
     this.slippagePct = options.slippagePct ?? COSTS.slippagePct;
+    // Funding/borrow del lado corto (auditoría 2026-06-26). 0 = sin coste de carry.
+    this.fundingDailyShort = options.fundingDailyShort ?? COSTS.fundingDailyShort ?? 0;
+    // Gestión de riesgo del corto (modo long/short): stop duro + cooldown anti-whipsaw.
+    this.shortStopPct = options.shortStopPct ?? 0;          // 0 = sin stop (comportamiento previo)
+    this.shortStopCooldown = options.shortStopCooldown ?? 0; // en velas (1d = 1 día)
 
     // Exit mode: 'fixed' = TP/SL/trailing% clásicos | 'atr' = Chandelier (ATR-based) + ATR SL
     this.exitMode = options.exitMode || 'fixed';
@@ -259,12 +264,23 @@ class BacktestEngine {
         // ALWAYS-IN long/short: la señal dicta el lado. BUY → largo (cierra corto previo);
         // SELL → corto (cierra largo previo). Flip en el cruce de la SMA.
         const pos = this.state.openPositions[symbol];
+        // STOP DURO del corto (auditoría #1): cubrir si sube ≥shortStopPct sobre la entrada, y
+        // poner cooldown para NO re-shortear de inmediato (evita whipsaw en rebote en V).
+        if (pos && pos.side === 'short' && this.shortStopPct > 0 &&
+            close >= pos.entryPrice * (1 + this.shortStopPct)) {
+          this.executeShortClose(symbol, close, time, 'STOP_LOSS');
+          this.state.cooldowns[symbol] = this.shortStopCooldown;
+          this.trackDrawdown(time, currentPrices);
+          this.recordEquity(time, currentPrices);
+          continue;
+        }
         if (signal === 'BUY') {
           if (pos && pos.side === 'short') this.executeShortClose(symbol, close, time, 'SIGNAL');
           if (!this.state.openPositions[symbol] && this.canOpenPosition(currentPrices)) this.executeBuy(symbol, close, time, null, buf);
         } else if (signal === 'SELL') {
           if (pos && pos.side === 'long') this.executeSell(symbol, close, time, 'SIGNAL');
-          if (!this.state.openPositions[symbol] && this.canOpenPosition(currentPrices)) this.executeShortOpen(symbol, close, time, buf);
+          // No re-shortear durante el cooldown post-stop.
+          if (!this.state.openPositions[symbol] && !isOnCooldown && this.canOpenPosition(currentPrices)) this.executeShortOpen(symbol, close, time, buf);
         }
         this.trackDrawdown(time, currentPrices);
         this.recordEquity(time, currentPrices);
@@ -411,7 +427,10 @@ class BacktestEngine {
     const slip = this.slippagePct, fee = this.feePct;
     const proceedsEntry = pos.amount * entry * (1 - slip) - pos.amount * entry * fee; // vender al abrir
     const costCover = pos.amount * price * (1 + slip) + pos.amount * price * fee;     // comprar al cerrar
-    const profit = proceedsEntry - costCover;
+    // Coste de carry (funding/borrow) por los días mantenido el corto (auditoría #5).
+    const daysHeld = Math.max(0, (time - new Date(pos.time).getTime()) / 86400000);
+    const fundingCost = pos.invested * this.fundingDailyShort * daysHeld;
+    const profit = proceedsEntry - costCover - fundingCost;
     const profitPct = (profit / pos.invested) * 100;
     this.state.balance += pos.invested + profit;
 

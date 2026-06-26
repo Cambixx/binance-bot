@@ -13,7 +13,7 @@
  */
 import fs from 'fs';
 import BacktestEngine, { strategyName } from './backtestEngine.js';
-import { BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD } from './config.js';
+import { BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT } from './config.js';
 
 const args = process.argv.slice(2);
 const getNum = (p, d) => { const a = args.find(x => x.startsWith(p)); return a ? parseFloat(a.split('=')[1]) : d; };
@@ -87,9 +87,13 @@ async function main() {
     const orig = console.log; console.log = () => {};
     let r;
     try {
+      const lsOpts = longShort ? {
+        shortStopPct: LONGSHORT.shortStopPct, shortStopCooldown: LONGSHORT.shortStopCooldownDays,
+        maxConcurrentPositions: LONGSHORT.maxConcurrentPositions, maxExposurePct: LONGSHORT.maxExposurePct,
+      } : {};
       const engine = new BacktestEngine({
         symbols: [...SYMBOLS], months: MONTHS, interval, strategyVersion,
-        exitMode, regimeOpts, volTarget, longShort, dataBySymbol: anchored, oosSplitRatio: oosRatio, ...engineExtra,
+        exitMode, regimeOpts, volTarget, longShort, ...lsOpts, dataBySymbol: anchored, oosSplitRatio: oosRatio, ...engineExtra,
       });
       r = await engine.run();
     } finally { console.log = orig; }

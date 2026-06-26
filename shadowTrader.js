@@ -274,7 +274,10 @@ class ShadowTrader {
       const entry = position.entryPrice ?? position.buyPrice;
       const proceedsEntry = position.amount * entry * (1 - COSTS.slippagePct) - position.amount * entry * COSTS.feePct;
       const costCover = position.amount * price * (1 + COSTS.slippagePct) + position.amount * price * COSTS.feePct;
-      profitUSDC = proceedsEntry - costCover;
+      // Coste de carry (funding/borrow) por días mantenido el corto (paridad con el motor, #5).
+      const daysHeld = Math.max(0, (Date.now() - new Date(position.timestamp).getTime()) / 86400000);
+      const fundingCost = position.investedUSDC * (COSTS.fundingDailyShort || 0) * daysHeld;
+      profitUSDC = proceedsEntry - costCover - fundingCost;
       profitPercentage = (profitUSDC / position.investedUSDC) * 100;
       returnUSDC = position.investedUSDC + profitUSDC; // margen + P&L
       state.balanceUSDC += returnUSDC;

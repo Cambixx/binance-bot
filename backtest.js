@@ -2,7 +2,7 @@ import fs from 'fs';
 import BacktestEngine, { strategyName } from './backtestEngine.js';
 import binance from './binanceService.js';
 import { exec } from 'child_process';
-import { BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD } from './config.js';
+import { BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT } from './config.js';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -143,7 +143,17 @@ async function main() {
     engineOpts.minCandles = sp + 10;
   }
   // Modo LONG/SHORT (always-in): SELL abre corto en vez de ir a cash. Solo con exitMode 'signal'.
-  if (args.includes('--longshort')) engineOpts.longShort = true;
+  // Incluye gestión de riesgo del corto (stop + cooldown) y caps de exposición (config.LONGSHORT),
+  // y SIEMPRE modela el funding del corto (config.COSTS.fundingDailyShort) → backtest honesto.
+  if (args.includes('--longshort')) {
+    engineOpts.longShort = true;
+    const ssArg = args.find(a => a.startsWith('--short-stop=')); // % override para calibrar (ej. 10)
+    engineOpts.shortStopPct = ssArg ? parseFloat(ssArg.split('=')[1]) / 100 : LONGSHORT.shortStopPct;
+    engineOpts.shortStopCooldown = LONGSHORT.shortStopCooldownDays; // 1 vela diaria = 1 día
+    engineOpts.maxConcurrentPositions = LONGSHORT.maxConcurrentPositions;
+    engineOpts.maxExposurePct = LONGSHORT.maxExposurePct;
+  }
+  if (args.includes('--no-funding')) engineOpts.fundingDailyShort = 0; // contraste sin funding
   // Vol-targeting: por defecto ON en el canal diario SMA (PARIDAD con el live, que lo cablea
   // por-canal); --no-voltarget lo desactiva. Para otras estrategias, opt-in con --voltarget.
   if (strategyVersion === 'SMA200' && !args.includes('--no-voltarget')) {

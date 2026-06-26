@@ -63,6 +63,25 @@ export const SMA_HYSTERESIS_BAND = 0.0;
 export const COSTS = {
   feePct: 0.001,        // 0.10% por lado (comisión taker Binance spot)
   slippagePct: 0.0005,  // 0.05% por lado (slippage estimado en 15m altcoins)
+  // Coste de CARRY del lado CORTO (auditoría 2026-06-26): un corto real paga funding/borrow
+  // mientras se mantiene. Prior conservador 0.03%/día ≈ 11%/año. IMPRESCINDIBLE para no
+  // sobreestimar el edge del canal long/short (sus cortos se mantienen semanas esperando el flip).
+  fundingDailyShort: 0.0003,
+};
+
+// ─────────────────────────── Canal LONG/SHORT (SMA150-LS) ───────────────────────────
+// Gestión de riesgo del lado corto (auditoría + investigación 2026-06-26). Un corto sin stop
+// tiene pérdida no acotada hasta que la SMA150 cruza (lag de semanas en un rebote en V).
+// CATASTROPHE-STOP, no optimización de retorno: el barrido mostró que un stop ajustado (8/10/12%)
+// es NO-MONOTÓNICO → sobreajuste a 1 muestra (la investigación exige "meseta, no pico"). Por eso
+// el stop se fija ANCHO (25%): solo dispara en squeezes/rebotes genuinos → acota el riesgo de cola
+// (un corto perdiendo >100% del margen, balance negativo) SIN sobreajustar. Stops más ajustados
+// (Chandelier+estado FLAT) quedan como experimento a validar OOS antes de tocarlos.
+export const LONGSHORT = {
+  shortStopPct: 0.25,        // cubrir el corto si sube ≥25% sobre la entrada (protección de cola)
+  shortStopCooldownDays: 5,  // tras un stop, no re-shortear ese símbolo durante N días (anti-whipsaw)
+  maxConcurrentPositions: null, // sin límite de nº (el sizing por margen ya auto-limita)
+  maxExposurePct: 0.85,      // guardrail: no comprometer >85% del equity a la vez
 };
 
 // ─────────────────────────── Vol-targeting (sizing dinámico) ───────────────────────────

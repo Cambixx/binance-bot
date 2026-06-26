@@ -45,23 +45,28 @@ Reconvierte el hueco del parado V4C-15m. Misma señal de régimen SMA150 que el 
 "always-in": en bajista abre **CORTO** en vez de ir a cash (flip largo↔corto en el cruce). El usuario
 opera a mano (corto y largo); el bot le da la señal de lado.
 
-**Validación (walk-forward 40m, cesta fija, costes 0.30%, 6 folds), long/short vs long-only:**
+**Gestión de riesgo del corto (auditoría 2026-06-26, bloque `config.LONGSHORT`):**
+- **Funding/borrow modelado** (`COSTS.fundingDailyShort` 0.03%/día ≈ 11%/año): un corto real paga carry. Sin esto el backtest sobreestimaba ~10pp de ROI.
+- **Catastrophe-stop del corto** (`shortStopPct` 25%): cubre si el precio sube ≥25% sobre la entrada → acota el riesgo de cola (squeeze / rebote en V mientras la SMA tarda en cruzar) y evita que un corto pierda >100% del margen. **Es red de seguridad, no optimización**: un barrido mostró que stops ajustados (8/10/12%) son no-monotónicos = overfit; el 25% no dispara en la muestra (0 stops) pero protege en live.
+- **Cooldown** post-stop (5 días) anti-whipsaw + **cap de exposición** (85%), portados también al bot live.
+
+**Validación HONESTA (walk-forward 40m, cesta fija, 0.30% RT + funding, 6 folds), long/short vs long-only:**
 
 | | Long/short (LS) | Long-only (1d) |
 |---|---|---|
-| ROI mediano por fold | **+14.4%** | +0.8% |
-| Sharpe mediano | **1.06** | 0.02 |
+| ROI mediano por fold | **+12.4%** | +0.8% |
+| Sharpe mediano | **1.03** | 0.02 |
 | Folds ROI>0 | **4/5** | 3/5 |
 | Folds PF≥1 | **5/5** | 4/5 |
-| Fold del crash (HODL −45%) | **+14.3%** (cortos) | −2.4% |
-| Full 40m | ROI +59%, Calmar 0.67, MaxDD −26% | ROI +49%, Calmar 0.61, MaxDD −28% |
+| Fold del crash (HODL −49%) | **+12.4%** (cortos) | −2.4% |
+| Full 40m | ROI **+52%**, Calmar **0.58**, MaxDD −27% | ROI +49%, Calmar 0.61, MaxDD −28% |
 
-> **Hallazgo (honesto):** en esta muestra el long/short batió al long-only de forma consistente entre
-> regímenes, sobre todo capturando el bajista reciente con los cortos. **PERO** es ~1 ciclo de mercado,
-> perfil trend-following (win-rate ~20%, rachas largas de pérdidas pequeñas), y cripto tiene sesgo
-> alcista de fondo → la rentabilidad futura del lado corto NO está garantizada. Además, en real un
-> corto tiene fricciones extra (borrow/funding) no modeladas. Por eso corre en **SHADOW** para
-> observar; ejecución manual. Mismo gate de promoción (§1.2): ≥6-8 cierres con PF>1 antes de fiarse.
+> **Hallazgo (honesto, neto de funding):** el long/short bate al long-only en riesgo-ajustado entre
+> regímenes, capturando el bajista con los cortos (fold del crash +12% vs −2%). **PERO** es ~1 ciclo,
+> perfil trend-following (WR ~20%), cripto tiene sesgo alcista, y el funding real es variable (puede
+> ser mucho mayor en altcoins). Corre en **SHADOW**; ejecución manual. Gate de promoción (§1.2):
+> ≥6-8 cierres con PF>1 antes de fiarse. Experimentos pendientes de validar OOS: Chandelier-stop +
+> estado FLAT (salir a cash en vez de always-in), filtros anti-whipsaw (SMA rápida de salida).
 
 ---
 

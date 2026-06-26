@@ -2,7 +2,7 @@ import binance from './binanceService.js';
 import { longShortTrader } from './shadowTrader.js';
 import telegramService from './telegramService.js';
 import { evaluateStrategySMA200, computeVolTargetWeight } from './indicators.js';
-import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK } from './config.js';
+import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT } from './config.js';
 
 /**
  * CANAL LONG/SHORT — SMA150 "always-in-the-market" (reconvierte el hueco del parado V4C-15m).
@@ -49,6 +49,8 @@ async function _runCycle() {
     return frac;
   };
 
+  const cooldowns = session.state.cooldowns || (session.state.cooldowns = {});
+
   for (const symbol of monitored) {
     const raw = await binance.getKlines(symbol, DAILY_INTERVAL, SMA_PERIOD + 11);
     const klines = raw.length > 0 ? raw.slice(0, -1) : raw;
@@ -56,14 +58,25 @@ async function _runCycle() {
 
     const closes = klines.map(k => k.close);
     const price = closes[closes.length - 1];
+    const candleTime = klines[klines.length - 1].openTime;
     const signal = evaluateStrategySMA200({ closes }, { smaPeriod: SMA_PERIOD, band: SMA_HYSTERESIS_BAND });
 
     const pos = session.state.openPositions[symbol];
-    const canOpen = symbols.includes(symbol); // solo abrir nuevos lados dentro de la cesta
+
+    // STOP DURO del corto (auditoría #1): cubrir si sube ≥shortStopPct sobre la entrada, y poner
+    // cooldown para NO re-shortear de inmediato. Es la protección contra squeeze / rebote en V.
+    if (pos && pos.side === 'short' && LONGSHORT.shortStopPct > 0 &&
+        price >= (pos.entryPrice ?? pos.buyPrice) * (1 + LONGSHORT.shortStopPct)) {
+      console.log(`🛑 [SMA${SMA_PERIOD}-LS] STOP CORTO ${symbol} a ${price} (subió ≥${(LONGSHORT.shortStopPct*100).toFixed(0)}% sobre entrada)`);
+      longShortTrader.applySell(session, symbol, price, 'STOP_LOSS');
+      cooldowns[symbol] = new Date(candleTime + LONGSHORT.shortStopCooldownDays * 86400000).toISOString();
+      continue;
+    }
+    const onCooldown = cooldowns[symbol] && new Date(cooldowns[symbol]).getTime() > candleTime;
+    const canOpen = symbols.includes(symbol) && canOpenLive(session.state); // cesta + cap exposición
     const frac = sizeFracFor(closes);
 
     if (signal === 'BUY') {
-      // Régimen alcista → LARGO. Cierra el corto si lo había, luego abre largo.
       if (pos && pos.side === 'short') {
         console.log(`🟢 [SMA${SMA_PERIOD}-LS] FLIP a LARGO: cubrir corto ${symbol} a ${price}`);
         longShortTrader.applySell(session, symbol, price, 'SIGNAL');
@@ -73,18 +86,34 @@ async function _runCycle() {
         longShortTrader.applyBuy(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
       }
     } else if (signal === 'SELL') {
-      // Régimen bajista → CORTO. Cierra el largo si lo había, luego abre corto.
       if (pos && pos.side === 'long') {
         console.log(`🔴 [SMA${SMA_PERIOD}-LS] FLIP a CORTO: cerrar largo ${symbol} a ${price}`);
         longShortTrader.applySell(session, symbol, price, 'SIGNAL');
       }
-      if (canOpen && !session.state.openPositions[symbol] && frac > 0) {
+      if (canOpen && !onCooldown && !session.state.openPositions[symbol] && frac > 0) {
         console.log(`🟠 [SMA${SMA_PERIOD}-LS] CORTO ${symbol} a ${price} (size ${(frac * 100).toFixed(0)}%)`);
         longShortTrader.applyShort(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
+      } else if (onCooldown && signal === 'SELL') {
+        console.log(`⏳ [SMA${SMA_PERIOD}-LS] ${symbol} en cooldown post-stop (no re-shortear)`);
       }
     }
   }
 
   await longShortTrader.commitSession(session);
   console.log(`✅ [SMA${SMA_PERIOD}-LS] Ciclo terminado.`);
+}
+
+// Cap de exposición en LIVE (auditoría #4): porta la guarda que el motor ya aplica, para que el
+// backtest y el live respeten los mismos límites. Valora a coste (sin llamadas extra a la API).
+function canOpenLive(state) {
+  const open = state.openPositions;
+  const count = Object.keys(open).length;
+  if (LONGSHORT.maxConcurrentPositions != null && count >= LONGSHORT.maxConcurrentPositions) return false;
+  if (LONGSHORT.maxExposurePct != null) {
+    let invested = 0;
+    for (const s in open) invested += open[s].investedUSDC || 0;
+    const equity = state.balanceUSDC + invested;
+    if (equity > 0 && invested / equity >= LONGSHORT.maxExposurePct) return false;
+  }
+  return true;
 }

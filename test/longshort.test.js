@@ -100,6 +100,33 @@ test('motor long/short: shortea en bajista y gana en la caída', async () => {
   assert.ok(shorts.some(t => t.profit > 0), 'algún corto debería ganar en la bajada');
 });
 
+test('funding reduce el P&L del corto cuanto más se mantiene', () => {
+  const t = new ShadowTrader();
+  const s = fakeSession(5000);
+  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  // Forzar 30 días de antigüedad del corto
+  s.state.openPositions['BTCUSDC'].timestamp = new Date(Date.now() - 30 * 86400000).toISOString();
+  t.applySell(s, 'BTCUSDC', 100, 'SIGNAL'); // cubre plano a 30 días
+  const tr = s.state.tradeHistory[0];
+  // Plano sin funding ≈ -0.30%; con 30d de funding (0.03%/día = 0.9%) ≈ -1.2% sobre 1000 ≈ -12 USDC
+  assert.ok(tr.profitUSDC < -9, `el funding debe restar (profit=${tr.profitUSDC})`);
+});
+
+test('motor long/short: el stop del corto dispara si el precio sube ≥ stopPct', async () => {
+  // Bajada larga (abre corto), luego SUBIDA fuerte >25% mientras la SMA sigue bajista → STOP.
+  const down = Array.from({ length: 220 }, (_, i) => 300 - i);   // baja 300→81 (bajista)
+  const spike = Array.from({ length: 10 }, (_, i) => 81 + i * 8); // sube 81→153 (+89%) rápido
+  const data = { AAAUSDC: makeDaily([...down, ...spike]) };
+  const engine = new BacktestEngine({
+    symbols: ['AAAUSDC'], interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal',
+    longShort: true, shortStopPct: 0.25, shortStopCooldown: 5,
+    dataBySymbol: data, bufferSize: 260, minCandles: 205, regimeOpts: { smaPeriod: 150 }, oosSplitRatio: 0.95,
+  });
+  const r = await engine.run();
+  const stops = r.trades.filter(t => t.side === 'short' && t.reason === 'STOP_LOSS');
+  assert.ok(stops.length >= 1, 'el stop del corto debería haber disparado en el spike');
+});
+
 test('motor long-only NO abre cortos (longShort=false)', async () => {
   const up = Array.from({ length: 220 }, (_, i) => 100 + i);
   const down = Array.from({ length: 80 }, (_, i) => 320 - i * 3);
