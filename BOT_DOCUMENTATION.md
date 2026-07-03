@@ -183,7 +183,9 @@ node sweep.js                                   # barrido de hipótesis + DSR + 
 | Flag | Default | Descripción |
 |---|---|---|
 | `--sma200` | — | Selecciona la estrategia de régimen SMA (periodo = `config.SMA_PERIOD`). |
-| `--longshort` | off | Always-in: en bajista abre **CORTO** en vez de ir a cash. |
+| `--longshort` | off | Always-in: en bajista abre **CORTO** en vez de ir a cash (con stop 25% + cooldown + caps de `config.LONGSHORT`). |
+| `--funding=flat` | `real` (en LS) | Funding del corto: `real` = serie FIRMADA del perp (default, validado 2026-07: domina a flat en todos los folds); `flat` = 0.03%/día en contra (contraste/offline). |
+| `--short-risk=N` | `config` (1.0) | κ: presupuesto de riesgo del corto = κ× el del largo (A/B; κ=0.5 fue RECHAZADO por el gate pareado). |
 | `--no-voltarget` | (vol-target ON) | Desactiva el vol-targeting del canal SMA. |
 | `--months=N` | `3` (SMA: 36) | Meses de historia a simular. |
 | `--symbols=A,B,..` | cesta fija large-caps | Universo explícito. |
@@ -217,6 +219,7 @@ Al abrirlo en el navegador verás:
 *   **`npm run walkforward`** — ventana anclada expansiva; reporta la **distribución** de ROI/Sharpe/PF/MaxDD por fold (no un único número) y un veredicto de robustez entre regímenes.
 *   **`npm run validate`** — bootstrap de trades (IC del ROI, prob. de pérdida), **Deflated Sharpe** (corrige multiple-testing) y **Monte Carlo de permutación** (`--permute=N`, p-value vs azar).
 *   **`node sweep.js`** — barrido de hipótesis con costes + OOS + **Deflated Sharpe y PBO/CSCV** (probabilidad de overfitting).
+*   **`node abtest.js`** — ⭐ torneo de VARIANTES con walk-forward **pareado** (descarga los datos una vez) y el **gate de adopción** (Calmar mediano ≥ baseline, IQR ≤ baseline, peor fold no peor). La vara de medir de toda mejora nueva. Edita `VARIANTS` en el archivo para cada experimento. Núcleo reutilizable en `wfcore.js`. Así se validaron y adoptaron/rechazaron las mejoras del research (ver `AUDIT_REPORT.md` §9 y `RESEARCH_MEJORAS_2026-07.md`).
 
 ---
 

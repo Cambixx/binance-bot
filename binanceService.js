@@ -158,6 +158,75 @@ class BinanceService {
       return [];
     }
   }
+
+  // --- FUNDING RATE (perps) — para el modelo de costes FIRMADO del corto (research 2026-07 #1) ---
+
+  /**
+   * Histórico de funding rate del perp USDT (público, sin auth). Paginado. Devuelve
+   * [{time, rate}] con rate por periodo de 8h (positivo = los largos pagan a los cortos).
+   */
+  async getFundingRateHistory(perpSymbol, startTime, endTime = Date.now()) {
+    const out = [];
+    let cur = startTime;
+    while (cur < endTime) {
+      const res = await getWithRetry(`${BINANCE_FAPI_BASE}/fapi/v1/fundingRate`, {
+        params: { symbol: perpSymbol, startTime: cur, endTime, limit: 1000 }
+      });
+      const rows = res.data;
+      if (!Array.isArray(rows) || rows.length === 0) break;
+      for (const r of rows) out.push({ time: r.fundingTime, rate: parseFloat(r.fundingRate) });
+      cur = rows[rows.length - 1].fundingTime + 1;
+      if (rows.length < 1000) break;
+    }
+    return out;
+  }
+
+  /**
+   * Series ACUMULADAS de funding por símbolo SPOT USDC (mapea BTCUSDC→BTCUSDT perp).
+   * Devuelve { SPOT_SYMBOL: [{t, cum}] } donde cum = Σ rates hasta t (para calcular el funding
+   * de un tramo como cumAt(t2)−cumAt(t1)). Símbolo sin perp o fetch fallido → ausente (el motor
+   * cae al modelo flat para ese símbolo).
+   */
+  async getFundingCumSeries(spotSymbols, startTime, endTime = Date.now()) {
+    const out = {};
+    for (const spot of spotSymbols) {
+      const perp = spot.replace(/USDC$/, 'USDT');
+      try {
+        const rates = await this.getFundingRateHistory(perp, startTime, endTime);
+        if (rates.length > 0) out[spot] = buildCumFromRates(rates);
+      } catch (error) {
+        console.warn(`⚠️ Sin funding real para ${spot} (${perp}): ${error.message} → fallback flat`);
+      }
+    }
+    return out;
+  }
+}
+
+// Endpoint público de futuros USDT-M (funding). No requiere clave.
+const BINANCE_FAPI_BASE = 'https://fapi.binance.com';
+
+/** [{time, rate}] → serie acumulada ordenada [{t, cum}] (pura, testeable). */
+export function buildCumFromRates(rates) {
+  const sorted = [...rates].sort((a, b) => a.time - b.time);
+  const out = [];
+  let cum = 0;
+  for (const r of sorted) {
+    if (!Number.isFinite(r.rate)) continue;
+    cum += r.rate;
+    out.push({ t: r.time, cum });
+  }
+  return out;
+}
+
+/** Acumulado de funding en el último punto ≤ t (búsqueda binaria; antes del primer punto → 0). */
+export function cumRateAt(series, t) {
+  if (!series || series.length === 0 || t < series[0].t) return 0;
+  let lo = 0, hi = series.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (series[mid].t <= t) lo = mid; else hi = mid - 1;
+  }
+  return series[lo].cum;
 }
 
 export default new BinanceService();

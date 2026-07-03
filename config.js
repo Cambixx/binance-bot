@@ -82,6 +82,22 @@ export const LONGSHORT = {
   shortStopCooldownDays: 5,  // tras un stop, no re-shortear ese símbolo durante N días (anti-whipsaw)
   maxConcurrentPositions: null, // sin límite de nº (el sizing por margen ya auto-limita)
   maxExposurePct: 0.85,      // guardrail: no comprometer >85% del equity a la vez
+  // κ (research 2026-07 #3): presupuesto de riesgo del corto = κ × el del largo. 1.0 = simétrico
+  // (comportamiento actual). κ=0.5 fue RECHAZADO por el gate (empeora el fold bajista). Flag A/B.
+  shortRiskFraction: 1.0,
+  // Filtro de ENTRADA del corto (research 2026-07 #8). ADOPTADO tras torneo pareado 2026-07-03:
+  // confirmDays=3 (exigir 3 cierres consecutivos bajo la SMA antes de shortear) fue la ÚNICA
+  // variante que pasó el gate limpio (Calmar mediano ≥ baseline, IQR ≤, peor fold no peor).
+  // Evita shortear en el primer cruce (el whipsaw que sufrieron SOL/AVAX en vivo). Rechazadas:
+  // banda-vol (#8A), confirm2d (IQR↑), veto anti-rebote #7b (Calmar↑ pero IQR↑ → dispersión).
+  shortEntry: { confirmDays: 3 },
+  // Gestión de SALIDA del corto (research 2026-07 #9) — CAPA sobre el stop 25% (nunca lo sustituye).
+  // ADOPTADO tras torneo pareado 2026-07-03: Chandelier del corto k=3.0 (cubrir si close > minLow
+  // + 3·ATR14) fue la MEJOR mejora encontrada: Calmar mediano 2.75→3.65 y — clave — IQR 4.16→3.5
+  // (gran reducción de dispersión entre folds), con meseta 2.5/3.0/3.5 (no es un pico → robusto).
+  // Time-stop: RECHAZADO (no aporta). El stop 25% se mantiene como backstop de catástrofe.
+  shortTrailAtr: 3.0,
+  shortTimeStopDays: 0,
 };
 
 // ─────────────────────────── Vol-targeting (sizing dinámico) ───────────────────────────

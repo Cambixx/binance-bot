@@ -179,3 +179,104 @@ en el "pico" de 8%. Walk-forward con funding+stop sigue ✅ robusto (ROI mediano
 Chandelier-stop del corto + estado FLAT (salir a cash en vez de always-in), asimetría de velocidad
 (entrar lento/salir rápido con SMA de salida 20-30), sizing inverse-vol sobre equity. La investigación
 los marca como experimentos (riesgo de whipsaw/overfit) → validar con walk-forward + DSR + PBO antes de live.
+
+---
+
+## 8. Check-up multiagente 2026-07-03 (auditoría live + research de mejoras)
+
+Dos workflows en paralelo (23 + 32 agentes, verificación/fact-checking adversarial): auditoría del
+estado live tras ~2 semanas de los canales nuevos + research online de mejoras. Plan completo del
+research en **`RESEARCH_MEJORAS_2026-07.md`**.
+
+### Veredicto por canal (estado a 2026-07-03)
+- **📅 SMA150-1d:** 100% cash bajo la SMA150 = comportamiento diseñado (preservar capital en bajista).
+  Métricas visibles contaminadas por 4 cierres administrativos (`MANUAL_CLEANUP` 06-26) → corregido.
+- **↕️ SMA150-LS:** 7 cortos abiertos desde 06-21, −0.27% reportado (−0.6% real con funding devengado)
+  mientras el benchmark rebotó +2.5% — MEJOR que una cesta corta naive. Dentro del guion trend-following.
+- **🔄 ROT:** cash correcto (gates). **⏹️ V4C:** parado.
+- **Gate de promoción:** diario 1/6-8 cierres válidos; LS 0/6-8. Los primeros cierres del LS serán
+  mayoritariamente whipsaws pequeños perdedores — es la distribución diseñada, no un fallo. Paciencia.
+
+### Fixes de instrumentación aplicados (todos verificados adversarialmente)
+| # | Hallazgo | Fix |
+|---|---|---|
+| 1 | Cierres administrativos contaminaban WR/PF del canal | `getStats` separa `signalTrades`/`signalWins` (base del gate); winRate = solo señales |
+| 2 | PF del backtest inflado por cierres forzados END_OF_BACKTEST (PF 10 total vs 0.95 realizado en ventanas cortas) | `computeMetrics.signalOnly` + línea "PF solo señales" en el runner (42m: total 1.75 vs honesto **1.40**) |
+| 3 | Funding no devengado en cortos ABIERTOS (equity optimista, escalón al cierre, MaxDD infra-medido) | Devengo en `getStats` (live) y `currentEquity(prices, time)` (motor) — simétrico |
+| 4 | El motor no leía `LONGSHORT` → backtests sin el catastrophe-stop del live | Defaults desde config (`shortStopPct/cooldown`, caps en modo LS) |
+| 5 | Cap de exposición divergente (live a coste y ANTES del flip; motor a nocional y después) | Motor side-aware (corto = margen) + live evalúa el cap DESPUÉS del cierre del flip |
+| 7 | Estado corrupto (edición manual) podía envenenar el balance con NaN | Guards `Number.isFinite` en `applySell` + assert en `commitSession` |
+
+### Research aplicado — Tier 0 + κ (validación pareada, 8 folds, 42m)
+- **Funding REAL firmado (#1)**: fetcher público de perps (`getFundingRateHistory`/`getFundingCumSeries`
+  en `binanceService.js`, helpers puros `buildCumFromRates`/`cumRateAt`), modo `fundingMode:'real'` en
+  el motor con fallback flat por símbolo. **Resultado del A/B pareado: el funding real DOMINA a flat en
+  los 7 folds** (Calmar mediano 1.45→2.62, IQR 4.43→4.27, peor fold igual) — el flat sobrecargaba al
+  corto (el funding cripto es mayormente positivo → el corto lo cobra). **Adoptado como default** en
+  `backtest.js`/`walkforward.js` para modo LS (`--funding=flat` para contraste). El edge del LS
+  SOBREVIVE al funding real → el Tier 2 del research mantiene prioridad.
+- **Gate de dispersión (#2)**: `walkforward.js` reporta ahora Calmar por fold (winsorizado ±10),
+  IQR, peor fold y el criterio de adopción pareado (mediana ≥ baseline, IQR ≤, peor fold no peor).
+- **κ=0.5 del corto (#3): RECHAZADO por el gate** — vs funding real κ=1: IQR peor (4.27→4.99), peor
+  fold peor, y en el fold bajista 2025-26 pierde −4.9% donde κ=1 gana +0.9% (recorta el hedge justo
+  cuando importa). `LONGSHORT.shortRiskFraction` queda en 1.0 (parámetro listo para re-test futuro
+  vía `--short-risk=`).
+
+### Pendiente del research (validar antes de activar; ver RESEARCH_MEJORAS_2026-07.md)
+Tier 1: vol-targeting condicional por quintiles (#4), vol-targeting de cartera con covarianza EWMA (#5).
+Tier 2: kill-switch de funding negativo persistente (#6), de-risking en pánico + veto anti-rebote (#7),
+entrada del corto más exigente (#8, torneo banda-vol vs confirmación-N). Tier 3: solo si lo anterior
+queda cerrado. **NO hacer:** banda simétrica, SuperTrend, filtro naive de correlación, quitar el stop
+25%, barrer anti-whipsaws juntos (infla PBO).
+
+---
+
+## 9. Mejoras del research aplicadas y validadas por el gate (2026-07-03)
+
+Se completaron las mejoras pendientes del plan (`RESEARCH_MEJORAS_2026-07.md`) con la disciplina
+pre-registrada: cada una se implementa como opción y se **ADOPTA solo si pasa el gate walk-forward
+pareado** (Calmar mediano ≥ baseline, IQR de Calmar ≤ baseline, peor fold no peor), en el nuevo
+harness **`abtest.js`** (+ `wfcore.js`) que descarga los datos UNA vez y compara variantes por los
+MISMOS folds. Resultado neto: el walk-forward del canal LS pasó de **Calmar 2.67 / IQR 4.27** a
+**Calmar 3.63 / IQR 3.50** (mismos 7 folds, 42m, funding real).
+
+### ✅ ADOPTADO (pasó el gate)
+| Mejora | Regla | Efecto (walk-forward pareado) |
+|---|---|---|
+| **#8 confirm3d** (entrada del corto) | Exigir **3 cierres consecutivos bajo la SMA** antes de shortear (`LONGSHORT.shortEntry`) | Evita el whipsaw del primer cruce (el que sufrieron SOL/AVAX en vivo). Calmar mediano +, IQR −, PF realizado 1.40→1.51 |
+| **#9 ATR-trail 3.0** (salida del corto) | Chandelier del corto: cubrir si `close > minLow + 3·ATR14` (`LONGSHORT.shortTrailAtr`), CAPA sobre el stop 25% | **La mejor mejora**: Calmar 2.75→**3.65**, **IQR 4.16→3.5** (gran reducción de dispersión), con **meseta** 2.5/3.0/3.5 (robusto, no pico). PF realizado →1.81 |
+| **#1 funding real** (Tier 0, §8) | Serie firmada del perp en vez de flat | Domina a flat en 7/7 folds |
+
+Ambos cableados en el motor Y en `longShortBot.js` (paridad live↔backtest) con tests.
+
+### 🔻 RECHAZADO por el gate (media ↑ pero dispersión ↑, o sin efecto)
+| Mejora | Por qué |
+|---|---|
+| #8A banda-vol + pendiente | Calmar < baseline y/o peor fold peor |
+| #8B confirm2d | IQR ↑ |
+| #7b veto anti-rebote 2σ/3σ | Calmar ↑ (¡3.83!) pero **IQR ↑** → más dependencia de régimen |
+| #4 vol-target condicional por quintiles | IQR ↑ |
+| #9 time-stop 21d/42d | Sin efecto / IQR ↑ |
+| #6 funding kill-switch | Calmar ↑ (4.37) pero **IQR ↑** (3.5→3.75) |
+| #3 κ=0.5 (recorte del corto) | Empeora el fold bajista (recorta el hedge donde el LS gana) |
+
+Patrón claro: varias variantes **suben la media pero aumentan la dispersión** — el gate las rechaza
+por diseño (el objetivo es robustez entre regímenes, no maximizar la mediana). Las opciones quedan
+implementadas y disponibles vía flags (`--short-risk`, `shortEntry`, etc.) para re-tests futuros.
+
+### 💤 IMPLEMENTADO pero DORMANTE (seguro de cola, off por defecto)
+- **#7a panic-derisk** (BTC 60d < −30% Y vol > P80 → corto al 50%): en la muestra **no gatilló**
+  (idéntico al baseline) → sin evidencia de que ayude; queda OFF (`LONGSHORT.panicDerisk=null`).
+  Implementado como red de seguridad para un crash extremo fuera de muestra.
+
+### ⏸️ EVALUADO y APLAZADO (no implementado, con razón)
+- **#5 vol-target de cartera (covarianza EWMA):** desajuste arquitectónico — el bot dimensiona
+  por-símbolo AL ENTRAR, sin rebalanceo continuo de cartera; el beneficio (reducir dispersión por
+  correlación) YA lo entrega el ATR-trail adoptado (IQR 4.27→3.5). Coste/valor no lo justifica ahora.
+- **Tier 3 #10 (Absorption Ratio), #11 (escalera de SMAs), #12 (Donchian ensemble):** el propio
+  research los marcó especulativos / marginales / contradichos por la evidencia interna (SMA150 es la
+  única longitud con holdout PF>1). Aplazados hasta cerrar lo anterior; no añadir complejidad no validable.
+
+### Herramientas nuevas
+- **`abtest.js`** — torneo de variantes con walk-forward pareado y el gate de adopción (`node abtest.js`).
+- **`wfcore.js`** — núcleo de walk-forward reutilizable (`runWalkForward`, `lsBaseEngineOpts`).

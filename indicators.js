@@ -759,6 +759,69 @@ function smaLast(closes, period) {
   return s / period;
 }
 
+/** Volatilidad diaria (stdev de retornos log) sobre las últimas `n` velas, como fracción. */
+export function dailyVol(closes, n = 20) {
+  const c = closes.length;
+  if (c < n + 1) return NaN;
+  const rets = [];
+  for (let i = c - n; i < c; i++) if (closes[i - 1] > 0 && closes[i] > 0) rets.push(Math.log(closes[i] / closes[i - 1]));
+  if (rets.length < 2) return NaN;
+  const m = rets.reduce((a, r) => a + r, 0) / rets.length;
+  const v = rets.reduce((a, r) => a + (r - m) ** 2, 0) / rets.length;
+  return Math.sqrt(v);
+}
+
+/**
+ * Filtro de ENTRADA del corto (research 2026-07 #8/#7b) — función PURA compartida por el motor y
+ * el bot live para paridad. Devuelve true si se permite ABRIR un corto ahora. La señal larga NO
+ * se toca (preserva el canal long-only validado). Todas las opciones off/0 → true (comportamiento
+ * actual). Las variantes son SUSTITUTOS: no combinar band+confirm (infla el PBO), usar torneo.
+ *
+ * @param {Array<number>} closes  cierres diarios
+ * @param {object} opts {
+ *   smaPeriod,
+ *   minDistBelowSigma  // banda: exigir precio ≤ SMA·(1 − k·σ20) → no shortear pegado a la media (#8A)
+ *   requireSlopeDown, slopeLookback  // exigir SMA cayendo: SMA_t < SMA_{t−L} (#8A)
+ *   confirmDays        // exigir N cierres consecutivos bajo la SMA (#8B)
+ *   maxDistBelowSigma  // veto: NO shortear si el precio ya está ≥ k·σ20 bajo la SMA (sobre-extendido, #7b)
+ * }
+ */
+export function shortEntryAllowed(closes, opts = {}) {
+  const smaPeriod = opts.smaPeriod ?? 150;
+  const sma = smaLast(closes, smaPeriod);
+  const price = closes[closes.length - 1];
+  if (!(sma > 0) || !(price > 0)) return true; // sin datos → no filtrar
+  const distBelow = (sma - price) / sma; // >0 si el precio está por debajo de la SMA
+
+  const sigma = dailyVol(closes, 20);
+  const s = Number.isFinite(sigma) ? sigma : 0;
+
+  // #8A banda: mínima distancia bajo la SMA (escalada por vol)
+  if (opts.minDistBelowSigma > 0 && s > 0) {
+    if (distBelow < opts.minDistBelowSigma * s) return false;
+  }
+  // #8A pendiente: la SMA debe estar cayendo
+  if (opts.requireSlopeDown) {
+    const L = opts.slopeLookback ?? 10;
+    const smaPrev = smaLast(closes.slice(0, closes.length - L), smaPeriod);
+    if (Number.isFinite(smaPrev) && !(sma < smaPrev)) return false;
+  }
+  // #8B confirmación: N cierres consecutivos bajo su SMA
+  if (opts.confirmDays > 0) {
+    const N = opts.confirmDays;
+    for (let j = 0; j < N; j++) {
+      const sub = closes.slice(0, closes.length - j);
+      const smaJ = smaLast(sub, smaPeriod);
+      if (!(sub[sub.length - 1] < smaJ)) return false;
+    }
+  }
+  // #7b veto anti-rebote: no shortear si ya está demasiado por debajo (riesgo de squeeze)
+  if (opts.maxDistBelowSigma > 0 && s > 0) {
+    if (distBelow > opts.maxDistBelowSigma * s) return false;
+  }
+  return true;
+}
+
 /**
  * ESTRATEGIA SMA200 (Faber / market-timing de régimen) — rank 3 de la investigación.
  * La mejor evidencia cost-aware/OOS. In-or-out: invertido si close > SMA(period), cash si no.
@@ -896,6 +959,45 @@ export function computeVolTargetWeight(closes, opts = {}) {
   if (w > wMax) w = wMax;
   if (w < 0) w = 0;
   if (w < (opts.minWeight ?? 0)) w = 0;
+  return w;
+}
+
+/**
+ * Vol-targeting CONDICIONAL por quintiles (research 2026-07 #4). En vez de escalar el tamaño de
+ * forma continua, solo lo recorta cuando la vol EWMA está en el quintil ALTO (>P80) de su propia
+ * distribución trailing; por debajo → exposición plena (wMax). Reduce el "churn" de re-sizing.
+ * (En este bot el sizing solo aplica AL ENTRAR, así que el efecto es: no recortar el tamaño de
+ * entrada salvo que se entre en un régimen de vol extrema.)
+ */
+export function computeVolTargetWeightConditional(closes, opts = {}) {
+  const targetVolAnnual = opts.targetVolAnnual ?? 0.5;
+  const lambda = opts.lambda ?? 0.94;
+  const wMax = opts.wMax ?? 1.0;
+  const periodsPerYear = opts.periodsPerYear ?? 365;
+  const hiPct = opts.hiPct ?? 0.80;
+  if (!closes || closes.length < 40) return wMax;
+
+  const rets = [];
+  for (let i = 1; i < closes.length; i++) if (closes[i - 1] > 0 && closes[i] > 0) rets.push(Math.log(closes[i] / closes[i - 1]));
+  if (rets.length < 30) return wMax;
+
+  // Serie de varianza EWMA (guardamos cada paso para el percentil expanding)
+  const seedWin = Math.min(20, rets.length);
+  let mean0 = 0; for (let i = 0; i < seedWin; i++) mean0 += rets[i]; mean0 /= seedWin;
+  let varE = 0; for (let i = 0; i < seedWin; i++) varE += (rets[i] - mean0) ** 2; varE /= seedWin;
+  const series = [varE];
+  for (let i = seedWin; i < rets.length; i++) { varE = lambda * varE + (1 - lambda) * rets[i] * rets[i]; series.push(varE); }
+
+  const cur = series[series.length - 1];
+  let below = 0; for (const v of series) if (v <= cur) below++;
+  const pct = below / series.length;
+
+  if (pct <= hiPct) return wMax; // vol normal/baja → exposición plena
+  const realizedVolAnnual = Math.sqrt(cur * periodsPerYear);
+  if (!(realizedVolAnnual > 0)) return wMax;
+  let w = targetVolAnnual / realizedVolAnnual;
+  if (w > wMax) w = wMax;
+  if (w < 0) w = 0;
   return w;
 }
 

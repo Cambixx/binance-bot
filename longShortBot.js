@@ -1,7 +1,7 @@
 import binance from './binanceService.js';
 import { longShortTrader } from './shadowTrader.js';
 import telegramService from './telegramService.js';
-import { evaluateStrategySMA200, computeVolTargetWeight } from './indicators.js';
+import { evaluateStrategySMA200, computeVolTargetWeight, shortEntryAllowed, calculateATR } from './indicators.js';
 import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT } from './config.js';
 
 /**
@@ -57,31 +57,48 @@ async function _runCycle() {
     if (klines.length < SMA_PERIOD + 1) continue;
 
     const closes = klines.map(k => k.close);
+    const highs = klines.map(k => k.high);
+    const lows = klines.map(k => k.low);
     const price = closes[closes.length - 1];
     const candleTime = klines[klines.length - 1].openTime;
     const signal = evaluateStrategySMA200({ closes }, { smaPeriod: SMA_PERIOD, band: SMA_HYSTERESIS_BAND });
 
     const pos = session.state.openPositions[symbol];
 
-    // STOP DURO del corto (auditoría #1): cubrir si sube ≥shortStopPct sobre la entrada, y poner
-    // cooldown para NO re-shortear de inmediato. Es la protección contra squeeze / rebote en V.
-    if (pos && pos.side === 'short' && LONGSHORT.shortStopPct > 0 &&
-        price >= (pos.entryPrice ?? pos.buyPrice) * (1 + LONGSHORT.shortStopPct)) {
-      console.log(`🛑 [SMA${SMA_PERIOD}-LS] STOP CORTO ${symbol} a ${price} (subió ≥${(LONGSHORT.shortStopPct*100).toFixed(0)}% sobre entrada)`);
-      longShortTrader.applySell(session, symbol, price, 'STOP_LOSS');
-      cooldowns[symbol] = new Date(candleTime + LONGSHORT.shortStopCooldownDays * 86400000).toISOString();
-      continue;
+    // ── Gestión de SALIDA del corto (paridad con el motor) ──
+    if (pos && pos.side === 'short') {
+      const entry = pos.entryPrice ?? pos.buyPrice;
+      const low = Math.min(pos.lowestLow ?? entry, price); // actualizar extremo favorable
+      if (low !== pos.lowestLow) longShortTrader.applyUpdatePosition(session, symbol, { lowestLow: low });
+      let shortExit = null;
+      // 1) STOP DURO (catástrofe): cubrir si sube ≥shortStopPct sobre la entrada.
+      if (LONGSHORT.shortStopPct > 0 && price >= entry * (1 + LONGSHORT.shortStopPct)) shortExit = 'STOP_LOSS';
+      // 2) Chandelier del corto (research #9, ADOPTADO k=3.0): cubrir si close > minLow + k·ATR14.
+      else if (LONGSHORT.shortTrailAtr > 0) {
+        const atrArr = calculateATR(highs, lows, closes, 14);
+        const atr = atrArr.length ? atrArr[atrArr.length - 1] : null;
+        if (atr && price > low + LONGSHORT.shortTrailAtr * atr) shortExit = 'TRAILING_STOP';
+      }
+      if (shortExit) {
+        console.log(`${shortExit === 'STOP_LOSS' ? '🛑' : '📉'} [SMA${SMA_PERIOD}-LS] ${shortExit === 'STOP_LOSS' ? 'STOP' : 'TRAIL'} CORTO ${symbol} a ${price}`);
+        longShortTrader.applySell(session, symbol, price, shortExit);
+        if (shortExit === 'STOP_LOSS') cooldowns[symbol] = new Date(candleTime + LONGSHORT.shortStopCooldownDays * 86400000).toISOString();
+        continue;
+      }
     }
     const onCooldown = cooldowns[symbol] && new Date(cooldowns[symbol]).getTime() > candleTime;
-    const canOpen = symbols.includes(symbol) && canOpenLive(session.state); // cesta + cap exposición
+    const inBasket = symbols.includes(symbol);
     const frac = sizeFracFor(closes);
 
+    // El cap de exposición se evalúa AL ABRIR, después del cierre del flip (auditoría 2026-07-03
+    // #5: antes se evaluaba antes de liberar el margen del lado que se cierra → paridad con el
+    // motor, que chequea canOpenPosition tras executeShortClose).
     if (signal === 'BUY') {
       if (pos && pos.side === 'short') {
         console.log(`🟢 [SMA${SMA_PERIOD}-LS] FLIP a LARGO: cubrir corto ${symbol} a ${price}`);
         longShortTrader.applySell(session, symbol, price, 'SIGNAL');
       }
-      if (canOpen && !session.state.openPositions[symbol] && frac > 0) {
+      if (inBasket && !session.state.openPositions[symbol] && frac > 0 && canOpenLive(session.state)) {
         console.log(`🟢 [SMA${SMA_PERIOD}-LS] LARGO ${symbol} a ${price} (size ${(frac * 100).toFixed(0)}%)`);
         longShortTrader.applyBuy(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
       }
@@ -90,9 +107,13 @@ async function _runCycle() {
         console.log(`🔴 [SMA${SMA_PERIOD}-LS] FLIP a CORTO: cerrar largo ${symbol} a ${price}`);
         longShortTrader.applySell(session, symbol, price, 'SIGNAL');
       }
-      if (canOpen && !onCooldown && !session.state.openPositions[symbol] && frac > 0) {
-        console.log(`🟠 [SMA${SMA_PERIOD}-LS] CORTO ${symbol} a ${price} (size ${(frac * 100).toFixed(0)}%)`);
-        longShortTrader.applyShort(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
+      // κ (LONGSHORT.shortRiskFraction): presupuesto de riesgo asimétrico del corto (paridad motor).
+      const shortFrac = frac * (LONGSHORT.shortRiskFraction ?? 1);
+      // Filtro de entrada del corto (research #8, ADOPTADO confirm3d): paridad con el motor.
+      const entryOk = shortEntryAllowed(closes, { ...LONGSHORT.shortEntry, smaPeriod: SMA_PERIOD });
+      if (inBasket && !onCooldown && entryOk && !session.state.openPositions[symbol] && shortFrac > 0 && canOpenLive(session.state)) {
+        console.log(`🟠 [SMA${SMA_PERIOD}-LS] CORTO ${symbol} a ${price} (size ${(shortFrac * 100).toFixed(0)}%)`);
+        longShortTrader.applyShort(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: shortFrac });
       } else if (onCooldown && signal === 'SELL') {
         console.log(`⏳ [SMA${SMA_PERIOD}-LS] ${symbol} en cooldown post-stop (no re-shortear)`);
       }

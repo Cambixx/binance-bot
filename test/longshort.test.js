@@ -112,19 +112,48 @@ test('funding reduce el P&L del corto cuanto más se mantiene', () => {
   assert.ok(tr.profitUSDC < -9, `el funding debe restar (profit=${tr.profitUSDC})`);
 });
 
-test('motor long/short: el stop del corto dispara si el precio sube ≥ stopPct', async () => {
+test('motor long/short: el stop de catástrofe (25%) dispara si el precio sube ≥ stopPct', async () => {
   // Bajada larga (abre corto), luego SUBIDA fuerte >25% mientras la SMA sigue bajista → STOP.
+  // shortTrailAtr:0 para aislar el stop de catástrofe (si no, el Chandelier cubre antes).
   const down = Array.from({ length: 220 }, (_, i) => 300 - i);   // baja 300→81 (bajista)
   const spike = Array.from({ length: 10 }, (_, i) => 81 + i * 8); // sube 81→153 (+89%) rápido
   const data = { AAAUSDC: makeDaily([...down, ...spike]) };
   const engine = new BacktestEngine({
     symbols: ['AAAUSDC'], interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal',
-    longShort: true, shortStopPct: 0.25, shortStopCooldown: 5,
+    longShort: true, shortStopPct: 0.25, shortStopCooldown: 5, shortTrailAtr: 0, shortEntry: {},
     dataBySymbol: data, bufferSize: 260, minCandles: 205, regimeOpts: { smaPeriod: 150 }, oosSplitRatio: 0.95,
   });
   const r = await engine.run();
   const stops = r.trades.filter(t => t.side === 'short' && t.reason === 'STOP_LOSS');
   assert.ok(stops.length >= 1, 'el stop del corto debería haber disparado en el spike');
+});
+
+test('motor long/short: el Chandelier del corto (ATR-trail) cubre en el rebote (research #9)', async () => {
+  // Bajada (abre corto y hace nuevos mínimos), luego rebote moderato → el Chandelier cubre
+  // ANTES del stop 25% (salida más ajustada). Reason = TRAILING_STOP.
+  const down = Array.from({ length: 230 }, (_, i) => 300 - i);   // 300→71
+  const bounce = Array.from({ length: 8 }, (_, i) => 71 + i * 4); // +45% moderado
+  const data = { AAAUSDC: makeDaily([...down, ...bounce]) };
+  const engine = new BacktestEngine({
+    symbols: ['AAAUSDC'], interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal',
+    longShort: true, shortStopPct: 0.25, shortTrailAtr: 3.0, shortEntry: {},
+    dataBySymbol: data, bufferSize: 260, minCandles: 205, regimeOpts: { smaPeriod: 150 }, oosSplitRatio: 0.95,
+  });
+  const r = await engine.run();
+  const trails = r.trades.filter(t => t.side === 'short' && t.reason === 'TRAILING_STOP');
+  assert.ok(trails.length >= 1, 'el Chandelier del corto debería haber cubierto en el rebote');
+});
+
+test('shortEntryAllowed: confirm3d exige 3 cierres bajo la SMA antes de shortear', async () => {
+  const { shortEntryAllowed } = await import('../indicators.js');
+  // 150 velas planas a 100 + 2 cierres bajo la SMA → confirm3d NO permite (solo 2)
+  const two = [...Array.from({ length: 150 }, () => 100), 99, 98];
+  assert.equal(shortEntryAllowed(two, { smaPeriod: 150, confirmDays: 3 }), false);
+  // 3 cierres bajo la SMA → permite
+  const three = [...Array.from({ length: 150 }, () => 100), 99, 98, 97];
+  assert.equal(shortEntryAllowed(three, { smaPeriod: 150, confirmDays: 3 }), true);
+  // sin filtro → siempre permite
+  assert.equal(shortEntryAllowed(two, { smaPeriod: 150 }), true);
 });
 
 test('motor long-only NO abre cortos (longShort=false)', async () => {
@@ -137,4 +166,78 @@ test('motor long-only NO abre cortos (longShort=false)', async () => {
   });
   const r = await engine.run();
   assert.equal(r.trades.filter(t => t.side === 'short').length, 0);
+});
+
+// ───────────────────── Auditoría 2026-07-03: instrumentación ─────────────────────
+test('computeMetrics expone signalOnly (PF sin END_OF_BACKTEST)', async () => {
+  const up = Array.from({ length: 220 }, (_, i) => 100 + i);
+  const down = Array.from({ length: 80 }, (_, i) => 320 - i * 3);
+  const data = { AAAUSDC: makeDaily([...up, ...down]) };
+  const engine = new BacktestEngine({
+    symbols: ['AAAUSDC'], interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal',
+    longShort: true, dataBySymbol: data, bufferSize: 260, minCandles: 205,
+    regimeOpts: { smaPeriod: 150 }, oosSplitRatio: 0.95,
+  });
+  const r = await engine.run();
+  assert.ok(r.summary.signalOnly, 'summary.signalOnly debe existir');
+  const eob = r.trades.filter(t => t.reason === 'END_OF_BACKTEST').length;
+  assert.equal(r.summary.signalOnly.trades, r.summary.totalTrades - eob);
+});
+
+test('getStats excluye cierres administrativos del winRate y cuenta signalTrades', async () => {
+  const t = new ShadowTrader();
+  const state = {
+    balanceUSDC: 5000, openPositions: {}, cooldowns: {},
+    tradeHistory: [
+      { symbol: 'AUSDC', reason: 'SIGNAL', profitUSDC: -46 },
+      { symbol: 'BUSDC', reason: 'MANUAL_CLEANUP', profitUSDC: 100 }, // ganador administrativo
+    ],
+  };
+  t._loadState = async () => state;
+  const st = await t.getStats({});
+  assert.equal(st.signalTrades, 1);
+  assert.equal(st.totalTrades, 2);
+  assert.equal(st.winRate, '0.00%'); // el cleanup ganador NO infla el WR de estrategia
+});
+
+test('commitSession aborta si el balance no es finito (guard anti-NaN)', async () => {
+  const t = new ShadowTrader();
+  t._saveState = async () => { throw new Error('no debería llegar a guardar'); };
+  await assert.rejects(
+    () => t.commitSession({ state: { balanceUSDC: NaN }, notifications: [] }),
+    /no finito/
+  );
+});
+
+test('funding devengado en cortos abiertos reduce el unrealized de getStats', async () => {
+  const t = new ShadowTrader();
+  const s = fakeSession(5000);
+  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  s.state.openPositions['BTCUSDC'].timestamp = new Date(Date.now() - 10 * 86400000).toISOString();
+  t._loadState = async () => s.state;
+  const st = await t.getStats({ BTCUSDC: 100 }); // precio plano → latente = −funding
+  // margen 1000 × 0.0003/día × 10 días = −3.00
+  assert.ok(Math.abs(Number(st.unrealizedPnLUSDC) - (-3)) < 0.01, `unrealized=${st.unrealizedPnLUSDC}`);
+});
+
+// ───────────────────── Funding real firmado (research 2026-07 #1) ─────────────────────
+test('buildCumFromRates + cumRateAt: acumulado y búsqueda binaria correctos', async () => {
+  const { buildCumFromRates, cumRateAt } = await import('../binanceService.js');
+  const s = buildCumFromRates([{ time: 300, rate: 0.0003 }, { time: 100, rate: 0.0001 }, { time: 200, rate: -0.0002 }]);
+  assert.equal(s.length, 3);
+  assert.ok(Math.abs(cumRateAt(s, 50) - 0) < 1e-12);          // antes del primer punto
+  assert.ok(Math.abs(cumRateAt(s, 250) - (-0.0001)) < 1e-12); // tras el 2º punto
+  assert.ok(Math.abs(cumRateAt(s, 999) - 0.0002) < 1e-9);     // tras el último
+});
+
+test('shortFundingCost: funding real positivo = el corto COBRA (coste negativo); flat siempre en contra', async () => {
+  const { buildCumFromRates } = await import('../binanceService.js');
+  const engine = new BacktestEngine({ symbols: ['AAAUSDC'], longShort: true, fundingMode: 'real' });
+  engine.fundingSeries = { AAAUSDC: buildCumFromRates([{ time: 1000, rate: 0.001 }, { time: 2000, rate: 0.001 }]) };
+  // Tramo que cubre ambos pagos (0.2% acumulado) sobre 1000 de margen → el corto cobra 2 → coste −2
+  const real = engine.shortFundingCost('AAAUSDC', 500, 2500, 1000);
+  assert.ok(Math.abs(real - (-2)) < 1e-9, `coste real=${real}`);
+  // Sin serie para el símbolo → cae a flat (0.03%/día en contra)
+  const flat = engine.shortFundingCost('BBBUSDC', 0, 10 * 86400000, 1000);
+  assert.ok(Math.abs(flat - 3) < 1e-9, `coste flat=${flat}`);
 });

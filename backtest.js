@@ -152,6 +152,15 @@ async function main() {
     engineOpts.shortStopCooldown = LONGSHORT.shortStopCooldownDays; // 1 vela diaria = 1 día
     engineOpts.maxConcurrentPositions = LONGSHORT.maxConcurrentPositions;
     engineOpts.maxExposurePct = LONGSHORT.maxExposurePct;
+    // Funding del corto: serie REAL firmada del perp por defecto (el corto cobra cuando el
+    // funding es positivo, paga cuando es negativo). Validado 2026-07-03: mejora Calmar en TODOS
+    // los folds pareados vs flat (el flat sobrecargaba al corto). --funding=flat para contraste;
+    // si fapi no responde, el motor cae a flat por símbolo automáticamente.
+    const fundingArg = args.find(a => a.startsWith('--funding='));
+    engineOpts.fundingMode = fundingArg ? fundingArg.split('=')[1] : 'real';
+    // κ del corto para A/B (--short-risk=0.5). Default config.LONGSHORT.shortRiskFraction (1.0).
+    const shortRiskArg = args.find(a => a.startsWith('--short-risk='));
+    if (shortRiskArg) engineOpts.shortRiskFraction = parseFloat(shortRiskArg.split('=')[1]);
   }
   if (args.includes('--no-funding')) engineOpts.fundingDailyShort = 0; // contraste sin funding
   // Vol-targeting: por defecto ON en el canal diario SMA (PARIDAD con el live, que lo cablea
@@ -197,6 +206,9 @@ async function main() {
     console.log(`  Balance Final:    ${s.finalBalance} USDC`);
     console.log(`  Win Rate:         ${s.winRate}%`);
     console.log(`  Profit Factor:    ${pf(s.profitFactor)}`);
+    if (s.signalOnly && s.signalOnly.trades < s.totalTrades) {
+      console.log(`  PF solo señales:  ${pf(s.signalOnly.profitFactor)}   (${s.signalOnly.trades} cierres reales; excluye END_OF_BACKTEST — el PF honesto de lo realizado)`);
+    }
     console.log(`  Max Drawdown:     -${s.maxDrawdown}%`);
     console.log(`  Sharpe / Sortino: ${s.sharpe} / ${s.sortino}   (anualizado)`);
     console.log(`  Calmar:           ${s.calmar}   (retorno anual ${s.annReturn}% / vol ${s.annVol}%)`);
