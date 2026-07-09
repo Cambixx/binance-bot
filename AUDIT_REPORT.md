@@ -150,19 +150,150 @@ No mover el diario a real hasta ver **≥6-8 trades CERRADOS con PF>1** en live.
 
 ---
 
-# Anexo: Auditoría 2026-07-09 (código + costes de cortos + resiliencia)
+## 7. Auditoría LIVE 2026-06-26 (con el canal long/short en marcha)
 
-Auditoría completa del código con correcciones aplicadas, validadas con la suite de tests
-(**39/39**) y re-backtests de 40 meses. Baselines pre-cambio: long-only ROI +72.1% / Calmar 0.75;
-long/short ROI +59.4% / Calmar 0.67.
+Multi-agente (auditoría de estado/código + investigación de mejoras), cada hallazgo/propuesta
+verificado adversarialmente. Estado live (régimen bajista): SMA150-LS +5.2% latente shorteando la
+caída; SMA150-1d −5.3% por longs mid-cap heredados; ROT en cash; V4C parado/congelado.
 
-## Correcciones aplicadas
+### Riesgos REALES confirmados y CORREGIDOS
+| # | Hallazgo | Fix aplicado |
+|---|---|---|
+| 1 (HIGH) | El corto no tenía NINGÚN stop → pérdida no acotada hasta el flip (laggy) de la SMA. El backtest **también** lo sobreestimaba. | **Catastrophe-stop 25%** + cooldown 5d en motor y live (`config.LONGSHORT`, `backtestEngine.js`, `longShortBot.js`). |
+| 2 | Funding/borrow del corto no modelado → edge sesgado al alza. | **`COSTS.fundingDailyShort` 0.03%/día** netado en `executeShortClose` y `shadowTrader.applySell` (paridad). Recorta ~10pp de ROI en backtest (62%→52%). |
+| 3 | Sin cap de exposición en LIVE (7 cortos = ~79%); `canOpenPosition` solo en backtest. | Caps `LONGSHORT.maxExposurePct` 0.85 portados a `longShortBot`/`dailyBot`. |
+| 4 | Margen 1x sin liquidación (balance podía ir negativo). | Acotado por el catastrophe-stop (cierra antes del −100%). |
+| 5 | `telegramService` sin timeout → un POST colgado starvea el cron. | `timeout: 8000` en ambos posts. |
+
+### Calibración honesta (anti-overfit)
+Un barrido de `shortStopPct` mostró 8%→ROI 58% pero 10%→28% y 12%→24% = **no-monotónico = sobreajuste
+a 1 muestra**. Por eso el stop se fija ANCHO (25%, protección de cola, 0 disparos en la muestra), NO
+en el "pico" de 8%. Walk-forward con funding+stop sigue ✅ robusto (ROI mediano por fold 12.4%, 5/5 PF≥1).
+
+### Acciones operativas recomendadas al usuario (sobre el estado live, no automatizadas)
+- **Force-close** las 4 posiciones mid-cap HEREDADAS del canal SMA150-1d (WLD/NEAR/XLM/JTO) que NO
+  están en `DAILY_BASKET` — su única salida es su propia SMA (lag enorme tras un pump). Saneamiento puntual.
+- **Resetear** el blob huérfano del V4C parado: `npx netlify blobs:delete shadow_trading_state bot_state_v2`.
+
+### Experimentos pendientes de validar OOS (NO aplicados)
+Chandelier-stop del corto + estado FLAT (salir a cash en vez de always-in), asimetría de velocidad
+(entrar lento/salir rápido con SMA de salida 20-30), sizing inverse-vol sobre equity. La investigación
+los marca como experimentos (riesgo de whipsaw/overfit) → validar con walk-forward + DSR + PBO antes de live.
+
+---
+
+## 8. Check-up multiagente 2026-07-03 (auditoría live + research de mejoras)
+
+Dos workflows en paralelo (23 + 32 agentes, verificación/fact-checking adversarial): auditoría del
+estado live tras ~2 semanas de los canales nuevos + research online de mejoras. Plan completo del
+research en **`RESEARCH_MEJORAS_2026-07.md`**.
+
+### Veredicto por canal (estado a 2026-07-03)
+- **📅 SMA150-1d:** 100% cash bajo la SMA150 = comportamiento diseñado (preservar capital en bajista).
+  Métricas visibles contaminadas por 4 cierres administrativos (`MANUAL_CLEANUP` 06-26) → corregido.
+- **↕️ SMA150-LS:** 7 cortos abiertos desde 06-21, −0.27% reportado (−0.6% real con funding devengado)
+  mientras el benchmark rebotó +2.5% — MEJOR que una cesta corta naive. Dentro del guion trend-following.
+- **🔄 ROT:** cash correcto (gates). **⏹️ V4C:** parado.
+- **Gate de promoción:** diario 1/6-8 cierres válidos; LS 0/6-8. Los primeros cierres del LS serán
+  mayoritariamente whipsaws pequeños perdedores — es la distribución diseñada, no un fallo. Paciencia.
+
+### Fixes de instrumentación aplicados (todos verificados adversarialmente)
+| # | Hallazgo | Fix |
+|---|---|---|
+| 1 | Cierres administrativos contaminaban WR/PF del canal | `getStats` separa `signalTrades`/`signalWins` (base del gate); winRate = solo señales |
+| 2 | PF del backtest inflado por cierres forzados END_OF_BACKTEST (PF 10 total vs 0.95 realizado en ventanas cortas) | `computeMetrics.signalOnly` + línea "PF solo señales" en el runner (42m: total 1.75 vs honesto **1.40**) |
+| 3 | Funding no devengado en cortos ABIERTOS (equity optimista, escalón al cierre, MaxDD infra-medido) | Devengo en `getStats` (live) y `currentEquity(prices, time)` (motor) — simétrico |
+| 4 | El motor no leía `LONGSHORT` → backtests sin el catastrophe-stop del live | Defaults desde config (`shortStopPct/cooldown`, caps en modo LS) |
+| 5 | Cap de exposición divergente (live a coste y ANTES del flip; motor a nocional y después) | Motor side-aware (corto = margen) + live evalúa el cap DESPUÉS del cierre del flip |
+| 7 | Estado corrupto (edición manual) podía envenenar el balance con NaN | Guards `Number.isFinite` en `applySell` + assert en `commitSession` |
+
+### Research aplicado — Tier 0 + κ (validación pareada, 8 folds, 42m)
+- **Funding REAL firmado (#1)**: fetcher público de perps (`getFundingRateHistory`/`getFundingCumSeries`
+  en `binanceService.js`, helpers puros `buildCumFromRates`/`cumRateAt`), modo `fundingMode:'real'` en
+  el motor con fallback flat por símbolo. **Resultado del A/B pareado: el funding real DOMINA a flat en
+  los 7 folds** (Calmar mediano 1.45→2.62, IQR 4.43→4.27, peor fold igual) — el flat sobrecargaba al
+  corto (el funding cripto es mayormente positivo → el corto lo cobra). **Adoptado como default** en
+  `backtest.js`/`walkforward.js` para modo LS (`--funding=flat` para contraste). El edge del LS
+  SOBREVIVE al funding real → el Tier 2 del research mantiene prioridad.
+- **Gate de dispersión (#2)**: `walkforward.js` reporta ahora Calmar por fold (winsorizado ±10),
+  IQR, peor fold y el criterio de adopción pareado (mediana ≥ baseline, IQR ≤, peor fold no peor).
+- **κ=0.5 del corto (#3): RECHAZADO por el gate** — vs funding real κ=1: IQR peor (4.27→4.99), peor
+  fold peor, y en el fold bajista 2025-26 pierde −4.9% donde κ=1 gana +0.9% (recorta el hedge justo
+  cuando importa). `LONGSHORT.shortRiskFraction` queda en 1.0 (parámetro listo para re-test futuro
+  vía `--short-risk=`).
+
+### Pendiente del research (validar antes de activar; ver RESEARCH_MEJORAS_2026-07.md)
+Tier 1: vol-targeting condicional por quintiles (#4), vol-targeting de cartera con covarianza EWMA (#5).
+Tier 2: kill-switch de funding negativo persistente (#6), de-risking en pánico + veto anti-rebote (#7),
+entrada del corto más exigente (#8, torneo banda-vol vs confirmación-N). Tier 3: solo si lo anterior
+queda cerrado. **NO hacer:** banda simétrica, SuperTrend, filtro naive de correlación, quitar el stop
+25%, barrer anti-whipsaws juntos (infla PBO).
+
+---
+
+## 9. Mejoras del research aplicadas y validadas por el gate (2026-07-03)
+
+Se completaron las mejoras pendientes del plan (`RESEARCH_MEJORAS_2026-07.md`) con la disciplina
+pre-registrada: cada una se implementa como opción y se **ADOPTA solo si pasa el gate walk-forward
+pareado** (Calmar mediano ≥ baseline, IQR de Calmar ≤ baseline, peor fold no peor), en el nuevo
+harness **`abtest.js`** (+ `wfcore.js`) que descarga los datos UNA vez y compara variantes por los
+MISMOS folds. Resultado neto: el walk-forward del canal LS pasó de **Calmar 2.67 / IQR 4.27** a
+**Calmar 3.63 / IQR 3.50** (mismos 7 folds, 42m, funding real).
+
+### ✅ ADOPTADO (pasó el gate)
+| Mejora | Regla | Efecto (walk-forward pareado) |
+|---|---|---|
+| **#8 confirm3d** (entrada del corto) | Exigir **3 cierres consecutivos bajo la SMA** antes de shortear (`LONGSHORT.shortEntry`) | Evita el whipsaw del primer cruce (el que sufrieron SOL/AVAX en vivo). Calmar mediano +, IQR −, PF realizado 1.40→1.51 |
+| **#9 ATR-trail 3.0** (salida del corto) | Chandelier del corto: cubrir si `close > minLow + 3·ATR14` (`LONGSHORT.shortTrailAtr`), CAPA sobre el stop 25% | **La mejor mejora**: Calmar 2.75→**3.65**, **IQR 4.16→3.5** (gran reducción de dispersión), con **meseta** 2.5/3.0/3.5 (robusto, no pico). PF realizado →1.81 |
+| **#1 funding real** (Tier 0, §8) | Serie firmada del perp en vez de flat | Domina a flat en 7/7 folds |
+
+Ambos cableados en el motor Y en `longShortBot.js` (paridad live↔backtest) con tests.
+
+### 🔻 RECHAZADO por el gate (media ↑ pero dispersión ↑, o sin efecto)
+| Mejora | Por qué |
+|---|---|
+| #8A banda-vol + pendiente | Calmar < baseline y/o peor fold peor |
+| #8B confirm2d | IQR ↑ |
+| #7b veto anti-rebote 2σ/3σ | Calmar ↑ (¡3.83!) pero **IQR ↑** → más dependencia de régimen |
+| #4 vol-target condicional por quintiles | IQR ↑ |
+| #9 time-stop 21d/42d | Sin efecto / IQR ↑ |
+| #6 funding kill-switch | Calmar ↑ (4.37) pero **IQR ↑** (3.5→3.75) |
+| #3 κ=0.5 (recorte del corto) | Empeora el fold bajista (recorta el hedge donde el LS gana) |
+
+Patrón claro: varias variantes **suben la media pero aumentan la dispersión** — el gate las rechaza
+por diseño (el objetivo es robustez entre regímenes, no maximizar la mediana). Las opciones quedan
+implementadas y disponibles vía flags (`--short-risk`, `shortEntry`, etc.) para re-tests futuros.
+
+### 💤 IMPLEMENTADO pero DORMANTE (seguro de cola, off por defecto)
+- **#7a panic-derisk** (BTC 60d < −30% Y vol > P80 → corto al 50%): en la muestra **no gatilló**
+  (idéntico al baseline) → sin evidencia de que ayude; queda OFF (`LONGSHORT.panicDerisk=null`).
+  Implementado como red de seguridad para un crash extremo fuera de muestra.
+
+### ⏸️ EVALUADO y APLAZADO (no implementado, con razón)
+- **#5 vol-target de cartera (covarianza EWMA):** desajuste arquitectónico — el bot dimensiona
+  por-símbolo AL ENTRAR, sin rebalanceo continuo de cartera; el beneficio (reducir dispersión por
+  correlación) YA lo entrega el ATR-trail adoptado (IQR 4.27→3.5). Coste/valor no lo justifica ahora.
+- **Tier 3 #10 (Absorption Ratio), #11 (escalera de SMAs), #12 (Donchian ensemble):** el propio
+  research los marcó especulativos / marginales / contradichos por la evidencia interna (SMA150 es la
+  única longitud con holdout PF>1). Aplazados hasta cerrar lo anterior; no añadir complejidad no validable.
+
+### Herramientas nuevas
+- **`abtest.js`** — torneo de variantes con walk-forward pareado y el gate de adopción (`node abtest.js`).
+- **`wfcore.js`** — núcleo de walk-forward reutilizable (`runWalkForward`, `lsBaseEngineOpts`).
+
+---
+
+## 10. Auditoría de código 2026-07-09 (resiliencia de infraestructura + validación)
+
+Auditoría completa del código, hecha en paralelo al check-up §8-§9 y **fusionada con él**
+(convergencia: ambas detectaron el funding del corto no modelado; en el merge se conserva UNA sola
+implementación, `COSTS.fundingDailyShort` + `fundingMode real/flat` de §8, sin doble cargo).
+Validada con la suite de tests y re-backtests de 40 meses.
 
 ### 🔴 ALTA
 | Hallazgo | Fix |
 |---|---|
-| **Cortos "gratis"**: ni el motor ni el ledger cobraban borrow/funding a los cortos → el edge del canal SMA150-LS estaba sobreestimado (el propio doc lo admitía como "no modelado"). | `COSTS.shortBorrowDailyPct` (0.03%/día × notional entrada × días abiertos) restado al cubrir, en `executeShortClose` (motor) y `applySell` (ledger) → paridad. Flags `--borrow=N`, `--no-costs`. **Impacto 40m: ROI +59.4→+49.0%, Calmar 0.67→0.55, holdout PF 3.4→3.0; walk-forward: ROI mediano +14.4→+8.8%, sigue 4/5 folds ROI>0 y 5/5 PF≥1** → el lado corto sobrevive al coste, pero más modesto. |
-| **Lost-update real en Netlify Blobs**: el patrón transaccional reducía la ventana de carrera pero dos invocaciones solapadas aún podían pisarse trades (last-write-wins). | **Concurrencia optimista**: `beginSession` captura el `etag` y `commitSession` escribe con `onlyIfMatch` (u `onlyIfNew` si el blob no existe). En conflicto, el ciclo aborta SIN notificar y reintenta al siguiente cron. |
+| **Lost-update real en Netlify Blobs**: el patrón transaccional reducía la ventana de carrera pero dos invocaciones solapadas aún podían pisarse trades (last-write-wins). | **Concurrencia optimista**: `beginSession` captura el `etag` y `commitSession` escribe con `onlyIfMatch` (u `onlyIfNew` si el blob no existe). En conflicto, el ciclo aborta SIN notificar y reintenta al siguiente cron. (Convive con el assert de balance finito de §8 #7.) |
 | **Rotación: liquidaciones espurias en fallos de API**: si `getTopVolumeSymbols` fallaba, el fallback de 4 monedas degeneraba el ranking → vendía posiciones sanas; si `getPrices` fallaba, el rebalanceo quedaba a medias PERO `lastRebalanceTime` se estampaba → 14 días de cartera inconsistente. | Guardas de integridad: aborta el ciclo (con alerta Telegram) si el universo es sospechosamente pequeño o falta el precio de algún símbolo implicado. Nada se persiste en fallo. |
 | **Backtest silenciosamente truncado**: un error transitorio a mitad de paginación hacía `break` sin aviso → métricas calculadas sobre datos incompletos. | `fetchHistoricalData` con retry+backoff (honra 429/418/5xx) y **fallo ruidoso** (throw) si la página no se recupera. |
 
@@ -171,7 +302,6 @@ long/short ROI +59.4% / Calmar 0.67.
 |---|---|
 | Cron lento: dailyBot y longShortBot descargaban **las mismas velas** de la misma cesta, en secuencia (riesgo de timeout serverless con 3 canales). | Descargas **en paralelo** (`Promise.all`) en los 3 bots + **caché de klines** de corta vida en `binanceService` (`{cacheMs}`) → el canal LS reutiliza las velas del diario en la misma invocación (≈mitad de llamadas). |
 | Ventana de cierres live (160) ≠ buffer del backtest (210) → el peso de vol-targeting (EWMA) veía series de longitud distinta. | Bots diarios piden `SMA_PERIOD+61` (⇒ 210 cierres tras descartar la vela en formación) = `bufferSize` del motor → paridad exacta. |
-| `canOpenPosition` medía la exposición del corto como `amount·precio` (nocional) en vez de margen+P&L flotante. | Cálculo side-aware (solo afecta si se activan los caps). |
 | `updatePosition` legacy escribía sin condición (podía pisar un commit concurrente). | Enrutado por `commitSession` condicional. |
 | Vulnerabilidades npm: `form-data` (high, CVE de CRLF injection — dependencia de axios) y `tmp` (high). | `npm audit fix` aplicado; quedan 6 moderadas transitivas (`@opentelemetry/core` vía `@netlify/blobs`, fix = downgrade breaking; riesgo práctico bajo, sin exposición a baggage headers entrantes). |
 
@@ -179,14 +309,19 @@ long/short ROI +59.4% / Calmar 0.67.
 | Hallazgo | Fix |
 |---|---|
 | Webhook sin `TELEGRAM_WEBHOOK_SECRET` queda protegido solo por chat_id (falsificable). | `console.warn` explícito en cada invocación sin secret (los comandos son read-only; configurar el secret sigue recomendado). |
+| `--no-costs` (idealizado) no anulaba el funding del corto. | Ahora también fuerza `fundingDailyShort=0` y modo flat. |
 
 ## Mejoras evaluadas y RECHAZADAS (con datos)
 - **Banda de histéresis SMA** (0.5/1/2% vs 0, 40m long-only): ninguna bate a band=0 en
   ROI/Calmar full (72.1%/0.75 vs 61.6%/0.72 la mejor, band=2); el holdout mejora marginalmente
   (PF 1.55→1.65) pero no compensa resetear la observación shadow live. Coherente con el rechazo
-  de la auditoría 2026-06-19. **Se mantiene `SMA_HYSTERESIS_BAND = 0`.**
+  de la auditoría 2026-06-19 y el "NO hacer" del research §8. **Se mantiene `SMA_HYSTERESIS_BAND = 0`.**
+- **Cuantificación del funding flat** (pre-merge, motor sin stops de §9): LS 40m ROI +59.4→+49.0%,
+  Calmar 0.67→0.55; walk-forward ROI mediano +14.4→+8.8%, 4/5 folds ROI>0, 5/5 PF≥1 → el lado corto
+  sobrevive al carry incluso en el modelo flat conservador (el default productivo es el funding
+  REAL firmado de §8, más favorable al corto).
 
 ## Estado del riesgo live
 Ningún cambio toca posiciones abiertas ni el formato del estado en blobs (solo se añade el etag
-en memoria durante la sesión). El borrow solo afecta a cierres de cortos FUTUROS del canal LS
-(shadow). La ventana 210 cambia marginalmente el peso de vol-targeting de NUEVAS entradas.
+en memoria durante la sesión). La ventana 210 cambia marginalmente el peso de vol-targeting de
+NUEVAS entradas.

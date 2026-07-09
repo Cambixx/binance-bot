@@ -63,12 +63,41 @@ export const SMA_HYSTERESIS_BAND = 0.0;
 export const COSTS = {
   feePct: 0.001,        // 0.10% por lado (comisión taker Binance spot)
   slippagePct: 0.0005,  // 0.05% por lado (slippage estimado en 15m altcoins)
-  // Coste de financiación de CORTOS (auditoría 2026-07-09): interés de borrow (margin) o funding
-  // (perp) que un corto real paga mientras está abierto. Se acumula pro-rata sobre el notional de
-  // entrada: coste = amount·entry·shortBorrowDailyPct·díasAbierto, y se resta al P&L al cubrir.
-  // 0.03%/día ≈ funding medio perp / borrow de majors en Binance (conservador). Sin esto el
-  // backtest y el ledger sobreestiman el edge del lado corto (los largos spot no lo pagan).
-  shortBorrowDailyPct: 0.0003,
+  // Coste de CARRY del lado CORTO (auditoría 2026-06-26): un corto real paga funding/borrow
+  // mientras se mantiene. Prior conservador 0.03%/día ≈ 11%/año. IMPRESCINDIBLE para no
+  // sobreestimar el edge del canal long/short (sus cortos se mantienen semanas esperando el flip).
+  fundingDailyShort: 0.0003,
+};
+
+// ─────────────────────────── Canal LONG/SHORT (SMA150-LS) ───────────────────────────
+// Gestión de riesgo del lado corto (auditoría + investigación 2026-06-26). Un corto sin stop
+// tiene pérdida no acotada hasta que la SMA150 cruza (lag de semanas en un rebote en V).
+// CATASTROPHE-STOP, no optimización de retorno: el barrido mostró que un stop ajustado (8/10/12%)
+// es NO-MONOTÓNICO → sobreajuste a 1 muestra (la investigación exige "meseta, no pico"). Por eso
+// el stop se fija ANCHO (25%): solo dispara en squeezes/rebotes genuinos → acota el riesgo de cola
+// (un corto perdiendo >100% del margen, balance negativo) SIN sobreajustar. Stops más ajustados
+// (Chandelier+estado FLAT) quedan como experimento a validar OOS antes de tocarlos.
+export const LONGSHORT = {
+  shortStopPct: 0.25,        // cubrir el corto si sube ≥25% sobre la entrada (protección de cola)
+  shortStopCooldownDays: 5,  // tras un stop, no re-shortear ese símbolo durante N días (anti-whipsaw)
+  maxConcurrentPositions: null, // sin límite de nº (el sizing por margen ya auto-limita)
+  maxExposurePct: 0.85,      // guardrail: no comprometer >85% del equity a la vez
+  // κ (research 2026-07 #3): presupuesto de riesgo del corto = κ × el del largo. 1.0 = simétrico
+  // (comportamiento actual). κ=0.5 fue RECHAZADO por el gate (empeora el fold bajista). Flag A/B.
+  shortRiskFraction: 1.0,
+  // Filtro de ENTRADA del corto (research 2026-07 #8). ADOPTADO tras torneo pareado 2026-07-03:
+  // confirmDays=3 (exigir 3 cierres consecutivos bajo la SMA antes de shortear) fue la ÚNICA
+  // variante que pasó el gate limpio (Calmar mediano ≥ baseline, IQR ≤, peor fold no peor).
+  // Evita shortear en el primer cruce (el whipsaw que sufrieron SOL/AVAX en vivo). Rechazadas:
+  // banda-vol (#8A), confirm2d (IQR↑), veto anti-rebote #7b (Calmar↑ pero IQR↑ → dispersión).
+  shortEntry: { confirmDays: 3 },
+  // Gestión de SALIDA del corto (research 2026-07 #9) — CAPA sobre el stop 25% (nunca lo sustituye).
+  // ADOPTADO tras torneo pareado 2026-07-03: Chandelier del corto k=3.0 (cubrir si close > minLow
+  // + 3·ATR14) fue la MEJOR mejora encontrada: Calmar mediano 2.75→3.65 y — clave — IQR 4.16→3.5
+  // (gran reducción de dispersión entre folds), con meseta 2.5/3.0/3.5 (no es un pico → robusto).
+  // Time-stop: RECHAZADO (no aporta). El stop 25% se mantiene como backstop de catástrofe.
+  shortTrailAtr: 3.0,
+  shortTimeStopDays: 0,
 };
 
 // ─────────────────────────── Vol-targeting (sizing dinámico) ───────────────────────────

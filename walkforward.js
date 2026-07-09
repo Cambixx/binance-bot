@@ -13,7 +13,8 @@
  */
 import fs from 'fs';
 import BacktestEngine, { strategyName } from './backtestEngine.js';
-import { BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD } from './config.js';
+import binance from './binanceService.js';
+import { BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT } from './config.js';
 
 const args = process.argv.slice(2);
 const getNum = (p, d) => { const a = args.find(x => x.startsWith(p)); return a ? parseFloat(a.split('=')[1]) : d; };
@@ -66,9 +67,22 @@ async function main() {
   const volTargetOn = args.includes('--voltarget') || (strategyVersion === 'SMA200' && !args.includes('--no-voltarget'));
   const volTarget = volTargetOn ? { ...VOLTARGET, enabled: true } : null;
   const longShort = args.includes('--longshort'); // always-in long/short (SELL abre corto)
+  // Funding del corto: serie REAL firmada por defecto (validado 2026-07-03: domina a flat en
+  // todos los folds pareados). --funding=flat para contraste.
+  const fundingMode = (getStr('--funding=', 'real') === 'flat') ? 'flat' : 'real';
+  const shortRiskFraction = getNum('--short-risk=', null); // κ para A/B (null = config)
   // Buffer escalado con el periodo SMA (no hardcode 260/210 → soporta SMA150).
   const sp = Math.max(regimeOpts.smaPeriod || 200, regimeOpts.entryLen || 0);
   const engineExtra = isDaily ? { bufferSize: sp + 60, minCandles: sp + 10 } : {};
+
+  // Prefetch ÚNICO de la serie de funding para todo el rango (los folds la comparten; evita
+  // re-descargar por fold). cumRateAt maneja los límites de cada ventana.
+  let fundingSeries = null;
+  if (longShort && fundingMode === 'real') {
+    console.log('💱 Descargando funding real de perps (una vez para todos los folds)...');
+    fundingSeries = await binance.getFundingCumSeries([...SYMBOLS], tMin, tMax + 86400000);
+    console.log(`   ✅ funding real para ${Object.keys(fundingSeries).length}/${SYMBOLS.length} símbolos`);
+  }
 
   // 3. Walk-forward de VENTANA ANCLADA EXPANSIVA: para cada fold i, el dataset incluye TODO el
   //    histórico desde tMin hasta el fin del fold (warmup completo para indicadores de lookback
@@ -87,20 +101,30 @@ async function main() {
     const orig = console.log; console.log = () => {};
     let r;
     try {
+      const lsOpts = longShort ? {
+        shortStopPct: LONGSHORT.shortStopPct, shortStopCooldown: LONGSHORT.shortStopCooldownDays,
+        maxConcurrentPositions: LONGSHORT.maxConcurrentPositions, maxExposurePct: LONGSHORT.maxExposurePct,
+        fundingMode, fundingSeries,
+        ...(shortRiskFraction != null ? { shortRiskFraction } : {}),
+      } : {};
       const engine = new BacktestEngine({
         symbols: [...SYMBOLS], months: MONTHS, interval, strategyVersion,
-        exitMode, regimeOpts, volTarget, longShort, dataBySymbol: anchored, oosSplitRatio: oosRatio, ...engineExtra,
+        exitMode, regimeOpts, volTarget, longShort, ...lsOpts, dataBySymbol: anchored, oosSplitRatio: oosRatio, ...engineExtra,
       });
       r = await engine.run();
     } finally { console.log = orig; }
 
     // Métricas del HOLDOUT (segmento OOS de este fold), no del acumulado.
     const s = r.holdoutSummary || r.summary;
+    // Calmar winsorizado (research 2026-07 #2): con MaxDD≈0 el Calmar explota → cap a ±10
+    // para que un fold trivial no domine la comparación entre variantes.
+    const calmarW = s.calmar == null ? null : Math.max(-10, Math.min(10, s.calmar));
     rows.push({
       fold: i + 1,
       from: new Date(from).toISOString().slice(0, 10),
       to: new Date(to).toISOString().slice(0, 10),
       trades: s.totalTrades, roi: s.roi, pf: s.profitFactor, sharpe: s.sharpe,
+      calmar: calmarW,
       maxDD: s.maxDrawdown, hodlRoi: (s.buyHold && s.buyHold.roi != null) ? s.buyHold.roi : (r.summary.buyHold ? r.summary.buyHold.roi : null),
     });
   }
@@ -108,14 +132,14 @@ async function main() {
   // 4. Reporte de la distribución
   const valid = rows.filter(r => !r.skipped && r.trades > 0);
   const pad = (v, n) => String(v ?? '—').padEnd(n);
-  console.log('FOLD  PERIODO                 TRADES  ROI%    PF     SHARPE  MaxDD%  HODL%');
-  console.log('─'.repeat(78));
+  console.log('FOLD  PERIODO                 TRADES  ROI%    PF     SHARPE  CALMAR  MaxDD%  HODL%');
+  console.log('─'.repeat(86));
   rows.forEach(r => {
     if (r.skipped) { console.log(`${pad(r.fold, 6)}(sin datos)`); return; }
     console.log(
       pad(r.fold, 6) + pad(`${r.from}→${r.to}`, 24) + pad(r.trades, 8) +
       pad(r.roi, 8) + pad(r.pf == null ? '∞' : r.pf, 7) + pad(r.sharpe, 8) +
-      pad(r.maxDD, 8) + pad(r.hodlRoi, 6)
+      pad(r.calmar, 8) + pad(r.maxDD, 8) + pad(r.hodlRoi, 6)
     );
   });
 
@@ -127,11 +151,19 @@ async function main() {
     const posRoi = valid.filter(r => r.roi > 0).length;
     const pfOk = valid.filter(r => r.pf == null || r.pf >= 1).length;
     const beatHodl = valid.filter(r => r.hodlRoi != null && r.roi >= r.hodlRoi).length;
+    // Dispersión de Calmar entre folds (research 2026-07 #2): para comparar variantes se exige
+    // mediana ≥ baseline E IQR menor (menos dependencia de régimen), comparación SIEMPRE pareada.
+    const calmars = valid.map(r => r.calmar).filter(v => v != null && isFinite(v)).sort((a, b) => a - b);
+    const q = (p) => calmars.length ? calmars[Math.min(calmars.length - 1, Math.floor(p * (calmars.length - 1)))] : null;
+    const iqr = calmars.length >= 4 ? parseFloat((q(0.75) - q(0.25)).toFixed(2)) : null;
+    const worst = calmars.length ? calmars[0] : null;
     console.log('\n📊 DISTRIBUCIÓN (folds con trades = ' + valid.length + '):');
     console.log(`   ROI mediano: ${med('roi')}%  | Sharpe mediano: ${med('sharpe')}  | MaxDD mediano: ${med('maxDD')}%`);
+    console.log(`   Calmar mediano: ${med('calmar')}  | IQR Calmar: ${iqr ?? 'n/a (usa --folds=8+ para medir dispersión)'}  | Peor fold: ${worst}`);
     console.log(`   Folds ROI>0: ${posRoi}/${valid.length}  | Folds PF≥1: ${pfOk}/${valid.length}  | Folds ≥HODL: ${beatHodl}/${valid.length}`);
     const robust = posRoi / valid.length >= 0.6 && pfOk / valid.length >= 0.6;
     console.log(`   Veredicto: ${robust ? '✅ Robusto entre regímenes' : '🔻 Inconsistente entre folds (frágil/dependiente de régimen)'}`);
+    console.log('   Gate de adopción de variantes: Calmar mediano ≥ baseline, IQR ≤ baseline, y el peor fold no peor (comparación pareada).');
   }
 
   fs.writeFileSync('walkforward-results.json', JSON.stringify({ strategy: strategyName(strategyVersion), months: MONTHS, folds: FOLDS, interval, symbols: SYMBOLS, rows }, null, 2));

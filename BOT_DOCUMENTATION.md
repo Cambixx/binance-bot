@@ -45,30 +45,28 @@ Reconvierte el hueco del parado V4C-15m. Misma señal de régimen SMA150 que el 
 "always-in": en bajista abre **CORTO** en vez de ir a cash (flip largo↔corto en el cruce). El usuario
 opera a mano (corto y largo); el bot le da la señal de lado.
 
-**Validación (walk-forward 40m, cesta fija, costes 0.30%, 6 folds), long/short vs long-only:**
+**Gestión de riesgo del corto (auditoría 2026-06-26, bloque `config.LONGSHORT`):**
+- **Funding/borrow modelado** (`COSTS.fundingDailyShort` 0.03%/día ≈ 11%/año): un corto real paga carry. Sin esto el backtest sobreestimaba ~10pp de ROI.
+- **Catastrophe-stop del corto** (`shortStopPct` 25%): cubre si el precio sube ≥25% sobre la entrada → acota el riesgo de cola (squeeze / rebote en V mientras la SMA tarda en cruzar) y evita que un corto pierda >100% del margen. **Es red de seguridad, no optimización**: un barrido mostró que stops ajustados (8/10/12%) son no-monotónicos = overfit; el 25% no dispara en la muestra (0 stops) pero protege en live.
+- **Cooldown** post-stop (5 días) anti-whipsaw + **cap de exposición** (85%), portados también al bot live.
+
+**Validación HONESTA (walk-forward 40m, cesta fija, 0.30% RT + funding, 6 folds), long/short vs long-only:**
 
 | | Long/short (LS) | Long-only (1d) |
 |---|---|---|
-| ROI mediano por fold | **+14.4%** | +0.8% |
-| Sharpe mediano | **1.06** | 0.02 |
+| ROI mediano por fold | **+12.4%** | +0.8% |
+| Sharpe mediano | **1.03** | 0.02 |
 | Folds ROI>0 | **4/5** | 3/5 |
 | Folds PF≥1 | **5/5** | 4/5 |
-| Fold del crash (HODL −45%) | **+14.3%** (cortos) | −2.4% |
-| Full 40m | ROI +59%, Calmar 0.67, MaxDD −26% | ROI +49%, Calmar 0.61, MaxDD −28% |
+| Fold del crash (HODL −49%) | **+12.4%** (cortos) | −2.4% |
+| Full 40m | ROI **+52%**, Calmar **0.58**, MaxDD −27% | ROI +49%, Calmar 0.61, MaxDD −28% |
 
-> **Hallazgo (honesto):** en esta muestra el long/short batió al long-only de forma consistente entre
-> regímenes, sobre todo capturando el bajista reciente con los cortos. **PERO** es ~1 ciclo de mercado,
-> perfil trend-following (win-rate ~20%, rachas largas de pérdidas pequeñas), y cripto tiene sesgo
-> alcista de fondo → la rentabilidad futura del lado corto NO está garantizada. Por eso corre en
-> **SHADOW** para observar; ejecución manual. Mismo gate de promoción (§1.2): ≥6-8 cierres con PF>1.
->
-> **🔎 Actualización (auditoría 2026-07-09):** el coste de **borrow/funding de los cortos** ya se
-> MODELA (antes no): `COSTS.shortBorrowDailyPct` = 0.03%/día sobre el notional de entrada, restado
-> al P&L al cubrir, tanto en el motor como en el ledger live (paridad). Cifras honestas 40m con
-> borrow: **ROI +49.0% (antes +59.4%), PF 1.75, Calmar 0.55, MaxDD −27.5%; holdout ROI +12.0%,
-> PF 3.0**. Walk-forward con borrow: ROI mediano **+8.8%** (antes +14.4%), Sharpe mediano 0.43,
-> 4/5 folds ROI>0, 5/5 PF≥1, fold del crash +8.8% (HODL −39.8%) → sigue robusto pero más modesto.
-> `--borrow=N` (%/día) para sensibilidad; `--no-costs` también lo anula.
+> **Hallazgo (honesto, neto de funding):** el long/short bate al long-only en riesgo-ajustado entre
+> regímenes, capturando el bajista con los cortos (fold del crash +12% vs −2%). **PERO** es ~1 ciclo,
+> perfil trend-following (WR ~20%), cripto tiene sesgo alcista, y el funding real es variable (puede
+> ser mucho mayor en altcoins). Corre en **SHADOW**; ejecución manual. Gate de promoción (§1.2):
+> ≥6-8 cierres con PF>1 antes de fiarse. Experimentos pendientes de validar OOS: Chandelier-stop +
+> estado FLAT (salir a cash en vez de always-in), filtros anti-whipsaw (SMA rápida de salida).
 
 ---
 
@@ -139,7 +137,7 @@ Tanto el backtest (`backtestEngine.js`) como el ledger live (`shadowTrader.js`) 
 
 Mecánica: en la COMPRA el slippage empeora el precio de llenado y la comisión reduce la cripto recibida; en la VENTA el slippage empeora el precio y la comisión reduce el retorno. Así un trade que entra y sale al mismo precio de mercado pierde exactamente el round-trip. Esto es **imprescindible**: sin costes el backtest sobreestima el edge (un backtest de 12 meses pasó de +8.17% a −7.61% al añadir costes — el signo se invierte).
 
-**Cortos (auditoría 2026-07-09):** además del round-trip, un corto paga **borrow/funding** mientras está abierto: `COSTS.shortBorrowDailyPct` (default 0.03%/día) × notional de entrada × días abiertos, restado al P&L al cubrir. Aplica en motor (`executeShortClose`) y ledger (`applySell` side short) por paridad. Flags: `--borrow=N` (%/día), `--no-costs` lo anula.
+**Cortos:** además del round-trip, un corto paga **carry (funding/borrow)** mientras está abierto: `COSTS.fundingDailyShort` (0.03%/día, modo `flat`) o la serie REAL firmada del perp (modo `real`, default en `--longshort`), aplicado al cubrir en motor (`executeShortClose`/`shortFundingCost`) y ledger (`applySell` side short) por paridad. Flags: `--funding=flat|real`, `--no-funding`; `--no-costs` (idealizado) también lo anula.
 
 Para comparar con/sin costes:
 ```bash
@@ -173,7 +171,7 @@ node backtest.js --sma200 --months=40
 open backtest-report-output.html
 
 # Validación rigurosa del canal (sin red para los tests; los runners sí descargan datos)
-npm test                                       # 39 tests (incluye cortos, borrow y motor long/short)
+npm test                                       # suite completa (cortos, funding, stops y motor long/short)
 npm run walkforward -- --sma200 --longshort    # robustez fold-by-fold (long/short)
 npm run walkforward -- --sma200                # robustez fold-by-fold (long-only)
 npm run validate   -- --sma200 --permute=200   # bootstrap CI + Deflated Sharpe + Monte Carlo
@@ -187,7 +185,9 @@ node sweep.js                                   # barrido de hipótesis + DSR + 
 | Flag | Default | Descripción |
 |---|---|---|
 | `--sma200` | — | Selecciona la estrategia de régimen SMA (periodo = `config.SMA_PERIOD`). |
-| `--longshort` | off | Always-in: en bajista abre **CORTO** en vez de ir a cash. |
+| `--longshort` | off | Always-in: en bajista abre **CORTO** en vez de ir a cash (con stop 25% + cooldown + caps de `config.LONGSHORT`). |
+| `--funding=flat` | `real` (en LS) | Funding del corto: `real` = serie FIRMADA del perp (default, validado 2026-07: domina a flat en todos los folds); `flat` = 0.03%/día en contra (contraste/offline). |
+| `--short-risk=N` | `config` (1.0) | κ: presupuesto de riesgo del corto = κ× el del largo (A/B; κ=0.5 fue RECHAZADO por el gate pareado). |
 | `--no-voltarget` | (vol-target ON) | Desactiva el vol-targeting del canal SMA. |
 | `--months=N` | `3` (SMA: 36) | Meses de historia a simular. |
 | `--symbols=A,B,..` | cesta fija large-caps | Universo explícito. |
@@ -196,7 +196,7 @@ node sweep.js                                   # barrido de hipótesis + DSR + 
 | `--sma=N` | `config.SMA_PERIOD` | Periodo SMA explícito. |
 | `--oos-split=R` | `0.7` | Ratio train/holdout. |
 | `--fee=N` / `--slippage=N` | config | Costes por lado (%). `--no-costs` los anula (idealizado). |
-| `--borrow=N` | config (0.03) | Borrow/funding de cortos en %/día (solo `--longshort`). `--no-costs` lo anula. |
+| `--no-funding` | off | Anula el carry del corto (contraste). `--no-costs` también lo anula. |
 | `--output=FILE` | `backtest-results.json` | JSON de salida. |
 | `--no-open` | off | No abrir el HTML al terminar (scripts/CI). |
 
@@ -222,6 +222,7 @@ Al abrirlo en el navegador verás:
 *   **`npm run walkforward`** — ventana anclada expansiva; reporta la **distribución** de ROI/Sharpe/PF/MaxDD por fold (no un único número) y un veredicto de robustez entre regímenes.
 *   **`npm run validate`** — bootstrap de trades (IC del ROI, prob. de pérdida), **Deflated Sharpe** (corrige multiple-testing) y **Monte Carlo de permutación** (`--permute=N`, p-value vs azar).
 *   **`node sweep.js`** — barrido de hipótesis con costes + OOS + **Deflated Sharpe y PBO/CSCV** (probabilidad de overfitting).
+*   **`node abtest.js`** — ⭐ torneo de VARIANTES con walk-forward **pareado** (descarga los datos una vez) y el **gate de adopción** (Calmar mediano ≥ baseline, IQR ≤ baseline, peor fold no peor). La vara de medir de toda mejora nueva. Edita `VARIANTS` en el archivo para cada experimento. Núcleo reutilizable en `wfcore.js`. Así se validaron y adoptaron/rechazaron las mejoras del research (ver `AUDIT_REPORT.md` §9 y `RESEARCH_MEJORAS_2026-07.md`).
 
 ---
 
@@ -239,7 +240,7 @@ Al abrirlo en el navegador verás:
 *   **`dailyBot.js`:** Canal diario SMA150 LONG-ONLY. Transaccional, idempotente intra-día, vol-targeting, alerta de fallo.
 *   **`longShortBot.js`:** Canal SMA150 LONG/SHORT always-in (`longShortTrader`, blob `bot_state_ls_v1`). Flip largo↔corto en el cruce de la SMA; `LONGSHORT_ENABLED=false` lo apaga. Ver §1.3.
 *   **`rotationBot.js`:** Canal de rotación cross-sectional + dual-momentum (experimental, `ROTATION_ENABLED`). Con **guardas de integridad** (auditoría 2026-07-09): aborta el ciclo sin operar ni estampar `lastRebalanceTime` si el universo viene degenerado (fallo de API → fallback de 4 monedas provocaría liquidaciones espurias) o si falta el precio de algún símbolo implicado en el rebalanceo.
-*   **`shadowTrader.js`:** Estado en **Netlify Blobs** con patrón transaccional y **concurrencia optimista** (auditoría 2026-07-09: `beginSession` captura el etag del blob y `commitSession` escribe con `onlyIfMatch` → dos invocaciones solapadas ya no pueden pisarse trades; la perdedora aborta y reintenta al siguiente cron). **Side-aware** (`applyBuy` largo / `applyShort` corto / `applySell` cierra ambos y cobra el borrow del corto / `getStats` valora cortos a margen+P&L). Cada canal su cartera (`storeKey`/`label`). Costes en ambos lados, `profitUSDC` numérico, escape HTML.
+*   **`shadowTrader.js`:** Estado en **Netlify Blobs** con patrón transaccional y **concurrencia optimista** (auditoría 2026-07-09: `beginSession` captura el etag del blob y `commitSession` escribe con `onlyIfMatch` → dos invocaciones solapadas ya no pueden pisarse trades; la perdedora aborta y reintenta al siguiente cron). **Side-aware** (`applyBuy` largo / `applyShort` corto / `applySell` cierra ambos y cobra el funding del corto / `getStats` valora cortos a margen+P&L con funding devengado). Cada canal su cartera (`storeKey`/`label`). Costes en ambos lados, `profitUSDC` numérico, escape HTML.
 *   **`binanceService.js`:** Cliente HTTP con timeout + retry/backoff (429/418), host de datos y host firmado separados. `getKlines` acepta `{ cacheMs }`: caché en memoria de corta vida que evita que dailyBot y longShortBot re-descarguen las mismas velas diarias en la misma invocación del cron.
 *   **`telegramService.js`:** Notificaciones (+ `escape` para HTML).
 *   **`validation.js`:** Estadística de validación (bootstrap CI, block bootstrap, Deflated Sharpe, PBO/CSCV, normal CDF/inv, PRNG determinista).

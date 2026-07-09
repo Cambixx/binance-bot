@@ -2,7 +2,7 @@ import fs from 'fs';
 import BacktestEngine, { strategyName } from './backtestEngine.js';
 import binance from './binanceService.js';
 import { exec } from 'child_process';
-import { BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD } from './config.js';
+import { BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT } from './config.js';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -119,10 +119,6 @@ async function main() {
   // Costes: por defecto los de config.js; --no-costs los anula; --fee/--slippage los sobreescriben
   const feePct = noCosts ? 0 : (feeArg ? parseFloat(feeArg.split('=')[1]) / 100 : COSTS.feePct);
   const slippagePct = noCosts ? 0 : (slipArg ? parseFloat(slipArg.split('=')[1]) / 100 : COSTS.slippagePct);
-  // Borrow/funding de cortos (%/día). --borrow=0.03 lo fija; --no-costs lo anula.
-  const borrowArg = args.find(a => a.startsWith('--borrow='));
-  const shortBorrowDailyPct = noCosts ? 0
-    : (borrowArg ? parseFloat(borrowArg.split('=')[1]) / 100 : COSTS.shortBorrowDailyPct);
 
   const engineOpts = {
     initialBalance,
@@ -137,8 +133,7 @@ async function main() {
     partialExitAtR: partialArg ? parseFloat(partialArg.split('=')[1]) : 0,
     regimeOpts,
     feePct,
-    slippagePct,
-    shortBorrowDailyPct
+    slippagePct
   };
   // La familia diaria necesita ventana grande; el buffer ESCALA con el periodo (fix auditoría:
   // antes 260/210 hardcodeado no escalaba con --sma → SMA150 arrastraba warm-up de SMA250).
@@ -148,7 +143,30 @@ async function main() {
     engineOpts.minCandles = sp + 10;
   }
   // Modo LONG/SHORT (always-in): SELL abre corto en vez de ir a cash. Solo con exitMode 'signal'.
-  if (args.includes('--longshort')) engineOpts.longShort = true;
+  // Incluye gestión de riesgo del corto (stop + cooldown) y caps de exposición (config.LONGSHORT),
+  // y SIEMPRE modela el funding del corto (config.COSTS.fundingDailyShort) → backtest honesto.
+  if (args.includes('--longshort')) {
+    engineOpts.longShort = true;
+    const ssArg = args.find(a => a.startsWith('--short-stop=')); // % override para calibrar (ej. 10)
+    engineOpts.shortStopPct = ssArg ? parseFloat(ssArg.split('=')[1]) / 100 : LONGSHORT.shortStopPct;
+    engineOpts.shortStopCooldown = LONGSHORT.shortStopCooldownDays; // 1 vela diaria = 1 día
+    engineOpts.maxConcurrentPositions = LONGSHORT.maxConcurrentPositions;
+    engineOpts.maxExposurePct = LONGSHORT.maxExposurePct;
+    // Funding del corto: serie REAL firmada del perp por defecto (el corto cobra cuando el
+    // funding es positivo, paga cuando es negativo). Validado 2026-07-03: mejora Calmar en TODOS
+    // los folds pareados vs flat (el flat sobrecargaba al corto). --funding=flat para contraste;
+    // si fapi no responde, el motor cae a flat por símbolo automáticamente.
+    const fundingArg = args.find(a => a.startsWith('--funding='));
+    engineOpts.fundingMode = fundingArg ? fundingArg.split('=')[1] : 'real';
+    // κ del corto para A/B (--short-risk=0.5). Default config.LONGSHORT.shortRiskFraction (1.0).
+    const shortRiskArg = args.find(a => a.startsWith('--short-risk='));
+    if (shortRiskArg) engineOpts.shortRiskFraction = parseFloat(shortRiskArg.split('=')[1]);
+  }
+  // Contraste sin funding (--no-funding); --no-costs (idealizado) también lo anula.
+  if (args.includes('--no-funding') || noCosts) {
+    engineOpts.fundingDailyShort = 0;
+    engineOpts.fundingMode = 'flat';
+  }
   // Vol-targeting: por defecto ON en el canal diario SMA (PARIDAD con el live, que lo cablea
   // por-canal); --no-voltarget lo desactiva. Para otras estrategias, opt-in con --voltarget.
   if (strategyVersion === 'SMA200' && !args.includes('--no-voltarget')) {
@@ -192,6 +210,9 @@ async function main() {
     console.log(`  Balance Final:    ${s.finalBalance} USDC`);
     console.log(`  Win Rate:         ${s.winRate}%`);
     console.log(`  Profit Factor:    ${pf(s.profitFactor)}`);
+    if (s.signalOnly && s.signalOnly.trades < s.totalTrades) {
+      console.log(`  PF solo señales:  ${pf(s.signalOnly.profitFactor)}   (${s.signalOnly.trades} cierres reales; excluye END_OF_BACKTEST — el PF honesto de lo realizado)`);
+    }
     console.log(`  Max Drawdown:     -${s.maxDrawdown}%`);
     console.log(`  Sharpe / Sortino: ${s.sharpe} / ${s.sortino}   (anualizado)`);
     console.log(`  Calmar:           ${s.calmar}   (retorno anual ${s.annReturn}% / vol ${s.annVol}%)`);

@@ -4,10 +4,12 @@ import {
   evaluateStrategyV4A, evaluateStrategyV4B, evaluateStrategyV4C,
   evaluateStrategyV5, evaluateStrategyV6,
   evaluateStrategySMA200, evaluateStrategySupertrendDaily, evaluateStrategyDonchian,
-  calculateATR, computeVolTargetWeight, periodsPerYearFor
+  calculateATR, computeVolTargetWeight, computeVolTargetWeightConditional, periodsPerYearFor,
+  shortEntryAllowed, dailyVol
 } from './indicators.js';
 import { evaluateFixedExit } from './exits.js';
-import { BLACKLIST, RISK, COSTS, LOOKBACK_15M } from './config.js';
+import binance, { cumRateAt } from './binanceService.js';
+import { BLACKLIST, RISK, COSTS, LOOKBACK_15M, LONGSHORT } from './config.js';
 
 const BINANCE_API_BASE = 'https://data-api.binance.vision/api/v3';
 
@@ -46,9 +48,33 @@ class BacktestEngine {
     // Costes de transacción (fees + slippage) — netados en cada trade. Ver config.js / auditoría.
     this.feePct = options.feePct ?? COSTS.feePct;
     this.slippagePct = options.slippagePct ?? COSTS.slippagePct;
-    // Coste de financiación de cortos (borrow/funding), %/día sobre el notional de entrada.
-    // Solo afecta al modo long/short; los largos spot no lo pagan (auditoría 2026-07-09).
-    this.shortBorrowDailyPct = options.shortBorrowDailyPct ?? COSTS.shortBorrowDailyPct ?? 0;
+    // Funding/borrow del lado corto (auditoría 2026-06-26). 0 = sin coste de carry.
+    this.fundingDailyShort = options.fundingDailyShort ?? COSTS.fundingDailyShort ?? 0;
+    // Gestión de riesgo del corto: stop duro + cooldown anti-whipsaw. Defaults desde config
+    // LONGSHORT (auditoría 2026-07-03 #4: antes 0 → los backtests corrían SIN el catastrophe-stop
+    // que el live siempre aplica → divergencia). Override explícito (incl. 0) sigue funcionando.
+    // ⚠️ shortStopCooldownDays↔velas solo es 1:1 en interval '1d' (el único donde hay cortos hoy).
+    this.shortStopPct = options.shortStopPct ?? LONGSHORT.shortStopPct ?? 0;
+    this.shortStopCooldown = options.shortStopCooldown ?? LONGSHORT.shortStopCooldownDays ?? 0;
+    // κ: presupuesto de riesgo del corto (research 2026-07 #3). 1.0 = simétrico (actual).
+    this.shortRiskFraction = options.shortRiskFraction ?? LONGSHORT.shortRiskFraction ?? 1.0;
+    // Filtro de ENTRADA del corto (research 2026-07 #8/#7b): banda/pendiente/confirmación/veto.
+    // {} = sin filtro (comportamiento actual). Se pasa a shortEntryAllowed.
+    this.shortEntry = options.shortEntry ?? LONGSHORT.shortEntry ?? {};
+    // Gestión de SALIDA del corto (research 2026-07 #9), CAPA sobre el stop 25% (no lo sustituye):
+    //  - shortTrailAtr (k): Chandelier del corto — cubrir si close > minLow + k·ATR14. 0 = off.
+    //  - shortTimeStopDays: cubrir si a los N días el corto no acumula beneficio. 0 = off.
+    this.shortTrailAtr = options.shortTrailAtr ?? LONGSHORT.shortTrailAtr ?? 0;
+    this.shortTimeStopDays = options.shortTimeStopDays ?? LONGSHORT.shortTimeStopDays ?? 0;
+    // Multiplicadores de exposición del corto (seguros de cola, research #7a/#6): reducen el
+    // tamaño del corto en pánico BTC o funding persistentemente negativo. null = off.
+    this.panicDerisk = options.panicDerisk ?? LONGSHORT.panicDerisk ?? null;
+    this.fundingKill = options.fundingKill ?? LONGSHORT.fundingKill ?? null;
+    // Modo de funding del corto: 'flat' (0.03%/día en contra, conservador) o 'real' (serie
+    // FIRMADA del perp — research 2026-07 #1). Con 'real', pasar fundingSeries pre-descargada
+    // ({SPOT: [{t,cum}]}) o el run() la descarga para los símbolos del universo.
+    this.fundingMode = options.fundingMode ?? 'flat';
+    this.fundingSeries = options.fundingSeries || null;
 
     // Exit mode: 'fixed' = TP/SL/trailing% clásicos | 'atr' = Chandelier (ATR-based) + ATR SL
     this.exitMode = options.exitMode || 'fixed';
@@ -216,6 +242,14 @@ class BacktestEngine {
     // Serie del benchmark equiponderado para superponer en la curva de equity del reporte
     this.benchmarkSeries = this.computeBuyHoldSeries(dataBySymbol);
 
+    // Funding real firmado (research 2026-07 #1): descargar la serie del perp si no la inyectaron.
+    if (this.longShort && this.fundingMode === 'real' && !this.fundingSeries && allEvents.length > 0) {
+      console.log('💱 Descargando funding real de perps (modo funding=real)...');
+      this.fundingSeries = await binance.getFundingCumSeries(this.symbols, allEvents[0].time, allEvents[allEvents.length - 1].time + 86400000);
+      const got = Object.keys(this.fundingSeries);
+      console.log(`   ✅ funding real para ${got.length}/${this.symbols.length} símbolos${got.length < this.symbols.length ? ' (resto → flat)' : ''}`);
+    }
+
     // Buffers OHLCV por símbolo (V3 necesita high, low, volume además de close)
     const candleBuffers = {};
     const currentPrices = {};
@@ -223,6 +257,8 @@ class BacktestEngine {
       candleBuffers[s] = { closes: [], highs: [], lows: [], volumes: [] };
       currentPrices[s] = 0;
     });
+    this._candleBuffers = candleBuffers; // ref para multiplicadores de riesgo (pánico BTC, #7a)
+    this._btcKey = this.symbols.find(s => s.includes('BTC')) || null;
 
     console.log(`📈 Procesando ${allEvents.length} eventos históricos...`);
 
@@ -277,12 +313,38 @@ class BacktestEngine {
         // ALWAYS-IN long/short: la señal dicta el lado. BUY → largo (cierra corto previo);
         // SELL → corto (cierra largo previo). Flip en el cruce de la SMA.
         const pos = this.state.openPositions[symbol];
+        // ── Gestión de SALIDA del corto (antes de la señal) ──
+        if (pos && pos.side === 'short') {
+          if (close < pos.lowestLow) pos.lowestLow = close; // actualizar extremo favorable
+          let shortExit = null;
+          // 1) STOP DURO / catastrophe (auditoría): cubrir si sube ≥shortStopPct sobre la entrada.
+          if (this.shortStopPct > 0 && close >= pos.entryPrice * (1 + this.shortStopPct)) shortExit = 'STOP_LOSS';
+          // 2) Chandelier del corto (#9): cubrir si close > minLow + k·ATR14.
+          else if (this.shortTrailAtr > 0) {
+            const atr = this.getCurrentATR(buf);
+            if (atr && close > pos.lowestLow + this.shortTrailAtr * atr) shortExit = 'TRAILING_STOP';
+          }
+          // 3) Time-stop (#9): a los N días sin beneficio (precio ≥ entrada), cubrir.
+          if (!shortExit && this.shortTimeStopDays > 0) {
+            const daysHeld = (time - new Date(pos.time).getTime()) / 86400000;
+            if (daysHeld >= this.shortTimeStopDays && close >= pos.entryPrice) shortExit = 'TIME_STOP';
+          }
+          if (shortExit) {
+            this.executeShortClose(symbol, close, time, shortExit);
+            if (shortExit === 'STOP_LOSS') this.state.cooldowns[symbol] = this.shortStopCooldown;
+            this.trackDrawdown(time, currentPrices);
+            this.recordEquity(time, currentPrices);
+            continue;
+          }
+        }
         if (signal === 'BUY') {
           if (pos && pos.side === 'short') this.executeShortClose(symbol, close, time, 'SIGNAL');
           if (!this.state.openPositions[symbol] && this.canOpenPosition(currentPrices)) this.executeBuy(symbol, close, time, null, buf);
         } else if (signal === 'SELL') {
           if (pos && pos.side === 'long') this.executeSell(symbol, close, time, 'SIGNAL');
-          if (!this.state.openPositions[symbol] && this.canOpenPosition(currentPrices)) this.executeShortOpen(symbol, close, time, buf);
+          // No re-shortear durante el cooldown post-stop, y solo si el filtro de entrada lo permite.
+          const entryOk = shortEntryAllowed(buf.closes, { ...this.shortEntry, smaPeriod: this.regimeOpts.smaPeriod ?? 150 });
+          if (!this.state.openPositions[symbol] && !isOnCooldown && entryOk && this.canOpenPosition(currentPrices)) this.executeShortOpen(symbol, close, time, buf);
         }
         this.trackDrawdown(time, currentPrices);
         this.recordEquity(time, currentPrices);
@@ -348,10 +410,11 @@ class BacktestEngine {
   computeSizeFraction(buf) {
     let frac = this.positionSizePct;
     if (this.volTarget && this.volTarget.enabled && buf && buf.closes.length > 20) {
-      const w = computeVolTargetWeight(buf.closes, {
-        ...this.volTarget,
-        periodsPerYear: periodsPerYearFor(this.interval),
-      });
+      const vtOpts = { ...this.volTarget, periodsPerYear: periodsPerYearFor(this.interval) };
+      // mode 'conditional' (research #4): solo recorta en el quintil alto de vol; si no, exposición plena.
+      const w = this.volTarget.mode === 'conditional'
+        ? computeVolTargetWeightConditional(buf.closes, vtOpts)
+        : computeVolTargetWeight(buf.closes, vtOpts);
       frac = this.positionSizePct * w;
       if (w <= (this.volTarget.minWeight ?? 0)) frac = 0;
     }
@@ -359,19 +422,22 @@ class BacktestEngine {
   }
 
   // Caps de cartera (fix #26): nº máximo de posiciones simultáneas y exposición agregada.
+  // En modo long/short, si no hay override, aplican los caps de LONGSHORT (paridad con el live,
+  // auditoría 2026-07-03 #5). Exposición SIDE-AWARE: un corto compromete su MARGEN (invested),
+  // no el nocional a mercado (antes un rally agregado bloqueaba aperturas de más).
   canOpenPosition(currentPrices) {
+    const maxPos = this.maxConcurrentPositions ?? (this.longShort ? LONGSHORT.maxConcurrentPositions : null);
+    const maxExp = this.maxExposurePct ?? (this.longShort ? LONGSHORT.maxExposurePct : null);
     const openCount = Object.keys(this.state.openPositions).length;
-    if (this.maxConcurrentPositions != null && openCount >= this.maxConcurrentPositions) return false;
-    if (this.maxExposurePct != null) {
+    if (maxPos != null && openCount >= maxPos) return false;
+    if (maxExp != null) {
       const eq = this.currentEquity(currentPrices);
       let invested = 0;
       for (const s in this.state.openPositions) {
         const p = this.state.openPositions[s];
-        const mkt = currentPrices[s] || p.buyPrice;
-        // Side-aware: el corto expone margen + P&L flotante, no amount·precio (auditoría 2026-07-09)
-        invested += p.side === 'short' ? p.invested + p.amount * (p.entryPrice - mkt) : p.amount * mkt;
+        invested += p.side === 'short' ? p.invested : p.amount * (currentPrices[s] || p.buyPrice);
       }
-      if (eq > 0 && invested / eq >= this.maxExposurePct) return false;
+      if (eq > 0 && invested / eq >= maxExp) return false;
     }
     return true;
   }
@@ -404,10 +470,57 @@ class BacktestEngine {
     };
   }
 
+  // Coste de carry del corto para un tramo [fromMs, toMs] (research 2026-07 #1).
+  // Modo 'real': funding FIRMADO del perp — positivo = el corto COBRA (coste negativo),
+  // negativo = el corto paga. Modo 'flat' (default): 0.03%/día siempre en contra (conservador).
+  shortFundingCost(symbol, fromMs, toMs, invested) {
+    const series = this.fundingSeries && this.fundingSeries[symbol];
+    if (this.fundingMode === 'real' && series) {
+      const received = invested * (cumRateAt(series, toMs) - cumRateAt(series, fromMs));
+      return -received; // lo cobrado reduce el coste
+    }
+    const daysHeld = Math.max(0, (toMs - fromMs) / 86400000);
+    return invested * this.fundingDailyShort * daysHeld;
+  }
+
   // Abre un CORTO (solo modo long/short, exitMode 'signal'). Modelo de margen: se reserva
   // `invested` del balance; el P&L se realiza al cubrir. amount = unidades nocionales (precio raw).
+  // κ (shortRiskFraction, research #3): presupuesto de riesgo asimétrico del corto — el corto
+  // toma κ× el tamaño que tomaría un largo. Default 1.0 (simétrico, comportamiento actual).
+  // Multiplicador de exposición del corto por seguros de cola (research #7a pánico / #6 funding).
+  shortRiskMultiplier(symbol, time) {
+    let m = 1;
+    if (this.panicDerisk && this._btcKey && this._candleBuffers[this._btcKey]) {
+      const c = this._candleBuffers[this._btcKey].closes;
+      const L = this.panicDerisk.btcLookback ?? 60;
+      if (c.length > L) {
+        const ret = c[c.length - 1] / c[c.length - 1 - L] - 1;
+        // vol percentil sobre la ventana del buffer
+        const vols = [];
+        for (let i = 21; i < c.length; i++) { const v = dailyVol(c.slice(0, i + 1), 20); if (Number.isFinite(v)) vols.push(v); }
+        const curVol = vols[vols.length - 1];
+        let below = 0; for (const v of vols) if (v <= curVol) below++;
+        const volPct = vols.length ? below / vols.length : 0;
+        if (ret < (this.panicDerisk.btcThreshold ?? -0.30) && volPct > (this.panicDerisk.volPct ?? 0.80)) {
+          m *= (this.panicDerisk.multiplier ?? 0.5);
+        }
+      }
+    }
+    if (this.fundingKill && this.fundingSeries) {
+      const series = this.fundingSeries[symbol] || (this._btcKey && this.fundingSeries[this._btcKey]);
+      if (series && series.length > 2) {
+        const days = this.fundingKill.avgDays ?? 30;
+        const cumNow = cumRateAt(series, time);
+        const cumPrev = cumRateAt(series, time - days * 86400000);
+        const avg = (cumNow - cumPrev); // acumulado en la ventana (negativo = el corto paga)
+        if (avg < (this.fundingKill.threshold ?? 0)) m *= (this.fundingKill.multiplier ?? 0.5);
+      }
+    }
+    return m;
+  }
+
   executeShortOpen(symbol, price, time, buf = null) {
-    const sizeFrac = this.computeSizeFraction(buf);
+    const sizeFrac = this.computeSizeFraction(buf) * (this.shortRiskFraction ?? 1) * this.shortRiskMultiplier(symbol, time);
     if (sizeFrac <= 0) return;
     const invested = this.state.balance * sizeFrac; // margen reservado
     const amount = invested / price;
@@ -420,6 +533,7 @@ class BacktestEngine {
       invested,
       time: new Date(time).toISOString(),
       peakPrice: price,
+      lowestLow: price,       // extremo favorable del corto (para el Chandelier trail, #9)
     };
   }
 
@@ -431,10 +545,9 @@ class BacktestEngine {
     const slip = this.slippagePct, fee = this.feePct;
     const proceedsEntry = pos.amount * entry * (1 - slip) - pos.amount * entry * fee; // vender al abrir
     const costCover = pos.amount * price * (1 + slip) + pos.amount * price * fee;     // comprar al cerrar
-    // Borrow/funding del corto pro-rata a los días abiertos (paridad con shadowTrader.applySell).
-    const holdDays = Math.max(0, (time - new Date(pos.time).getTime()) / 86400000);
-    const borrowCost = pos.amount * entry * this.shortBorrowDailyPct * holdDays;
-    const profit = proceedsEntry - costCover - borrowCost;
+    // Coste de carry (funding/borrow) del tramo mantenido — flat o serie real firmada.
+    const fundingCost = this.shortFundingCost(symbol, new Date(pos.time).getTime(), time, pos.invested);
+    const profit = proceedsEntry - costCover - fundingCost;
     const profitPct = (profit / pos.invested) * 100;
     this.state.balance += pos.invested + profit;
 
@@ -628,14 +741,22 @@ class BacktestEngine {
   }
 
   // Equity total (cash + posiciones valoradas a mercado) en este instante. Side-aware:
-  // largo = amount·mkt; corto = margen + amount·(entry − mkt) (P&L flotante del corto).
-  currentEquity(currentPrices) {
+  // largo = amount·mkt; corto = margen + amount·(entry − mkt) − funding devengado (auditoría
+  // 2026-07-03 #3: sin el devengo, la curva del corto era optimista y el funding aparecía como
+  // un escalón artificial al cierre → MaxDD infra-medido). `time` (ms) opcional: sin él, no
+  // se devenga (comportamiento previo, usado solo por canOpenPosition para el cap).
+  currentEquity(currentPrices, time = null) {
     let investedValue = 0;
     for (const s in this.state.openPositions) {
       const pos = this.state.openPositions[s];
       const mkt = currentPrices[s] || pos.buyPrice;
       if (pos.side === 'short') {
-        investedValue += pos.invested + pos.amount * (pos.entryPrice - mkt);
+        let fundingAccrued = 0;
+        if (time != null) {
+          const entryMs = new Date(pos.time).getTime();
+          if (Number.isFinite(entryMs)) fundingAccrued = this.shortFundingCost(s, entryMs, time, pos.invested);
+        }
+        investedValue += pos.invested + pos.amount * (pos.entryPrice - mkt) - fundingAccrued;
       } else {
         investedValue += pos.amount * mkt;
       }
@@ -647,7 +768,7 @@ class BacktestEngine {
   // por fase, independiente del equityCurve submuestreado (que es solo para el plot). Así el
   // DD reportado y el de computeBuyHold se miden con la misma granularidad por-vela.
   trackDrawdown(time, currentPrices) {
-    const eq = this.currentEquity(currentPrices);
+    const eq = this.currentEquity(currentPrices, time);
     const update = (acc) => {
       if (eq > acc.peak) acc.peak = eq;
       if (acc.peak > 0) {
@@ -664,7 +785,7 @@ class BacktestEngine {
     const lastRecord = this.state.equityCurve[this.state.equityCurve.length - 1];
     if (!force && lastRecord && (time - lastRecord.time) < 3600000) return;
 
-    const totalEquity = this.currentEquity(currentPrices);
+    const totalEquity = this.currentEquity(currentPrices, time);
     this.state.equityCurve.push({ time, equity: parseFloat(totalEquity.toFixed(2)) });
   }
 
@@ -720,6 +841,22 @@ class BacktestEngine {
     const grossLoss = Math.abs(losers.reduce((s, t) => s + t.profit, 0));
     // profitFactor (fix #8): sin pérdidas y con ganancias = Infinity (no 0, que es el peor valor).
     const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? Infinity : 0);
+
+    // Métricas SOLO de cierres reales de estrategia (auditoría 2026-07-03 #2): los cierres
+    // forzados END_OF_BACKTEST marcan a mercado posiciones aún abiertas — en trend-following
+    // concentran los ganadores y pueden inflar el PF total (p.ej. PF 10 total vs 0.95 realizado).
+    // El PF "honesto" de lo que la estrategia CERRÓ por sí misma es signalOnly.profitFactor.
+    const realTrades = trades.filter(t => t.reason !== 'END_OF_BACKTEST');
+    const sWin = realTrades.filter(t => t.profit > 0);
+    const sLoss = realTrades.filter(t => t.profit < 0);
+    const sGP = sWin.reduce((s, t) => s + t.profit, 0);
+    const sGL = Math.abs(sLoss.reduce((s, t) => s + t.profit, 0));
+    const signalOnly = {
+      trades: realTrades.length,
+      winRate: realTrades.length > 0 ? parseFloat(((sWin.length / realTrades.length) * 100).toFixed(2)) : 0,
+      profitFactor: sGL > 0 ? parseFloat((sGP / sGL).toFixed(2)) : (sGP > 0 ? null : 0), // null = ∞
+      netProfit: parseFloat((sGP - sGL).toFixed(2)),
+    };
 
     // MaxDD: usa el tracker per-bar si está disponible (fix #1); si no, cae a la curva.
     let maxDD;
@@ -779,6 +916,7 @@ class BacktestEngine {
       avgLoss: parseFloat(avgLoss.toFixed(2)),
       expectancy: parseFloat(expectancy.toFixed(2)),
       avgDurationHours: parseFloat(avgDurationHours.toFixed(1)),
+      signalOnly, // métricas SOLO de cierres reales (sin END_OF_BACKTEST) — el PF honesto
       byReason,
       bySymbol
     };

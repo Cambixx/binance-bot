@@ -79,9 +79,13 @@ class ShadowTrader {
   }
 
   async commitSession(session) {
+    // Assert de integridad (auditoría 2026-07-03 #7): jamás persistir un balance no-finito.
+    if (!Number.isFinite(session.state.balanceUSDC)) {
+      throw new Error(`[${this.label}] commit abortado: balanceUSDC no finito (${session.state.balanceUSDC}) — estado NO persistido`);
+    }
     const store = this.getStore();
-    // Escritura condicional: exige que el blob no haya cambiado desde beginSession.
-    // Sin etag (blob nuevo) exige que siga sin existir (onlyIfNew).
+    // Escritura condicional (auditoría 2026-07-09): exige que el blob no haya cambiado desde
+    // beginSession. Sin etag (blob nuevo) exige que siga sin existir (onlyIfNew).
     const cond = session.etag ? { onlyIfMatch: session.etag } : { onlyIfNew: true };
     const res = await store.setJSON(this.storeKey, session.state, cond);
     if (res && res.modified === false) {
@@ -119,15 +123,25 @@ class ShadowTrader {
   async getStats(currentPrices = {}) {
     const state = await this._loadState();
 
+    // Métricas de ESTRATEGIA vs administrativas (auditoría 2026-07-03 #1): los cierres
+    // no-señal (MANUAL_CLEANUP, limpiezas de estado) mueven el cash real pero NO son señales
+    // → se excluyen de winRate/PF y del conteo del gate de promoción. realizedPnL sí los
+    // incluye (la caja es la caja).
+    const ADMIN_REASONS = new Set(['MANUAL_CLEANUP', 'END_OF_BACKTEST']);
     const totalTrades = state.tradeHistory.length;
     let winningTrades = 0;
     let realizedPnL = 0;
+    let signalTrades = 0, signalWins = 0;
     state.tradeHistory.forEach(trade => {
       const p = Number(trade.profitUSDC) || 0;
       realizedPnL += p;
       if (p > 0) winningTrades++;
+      if (!ADMIN_REASONS.has(trade.reason)) {
+        signalTrades++;
+        if (p > 0) signalWins++;
+      }
     });
-    const winRate = totalTrades > 0 ? ((winningTrades / totalTrades) * 100).toFixed(2) : '0.00';
+    const winRate = signalTrades > 0 ? ((signalWins / signalTrades) * 100).toFixed(2) : '0.00';
 
     let investedEquity = 0;
     let unrealizedPnL = 0;
@@ -138,9 +152,13 @@ class ShadowTrader {
       const valuationPrice = (mkt && mkt > 0) ? mkt : pos.buyPrice;
       if (!(mkt && mkt > 0)) pricedAtMarket = false;
       if (pos.side === 'short') {
-        // Corto: aporta margen + P&L flotante = invested + amount·(entry − mkt).
+        // Corto: aporta margen + P&L flotante = invested + amount·(entry − mkt),
+        // MENOS el funding DEVENGADO hasta hoy (auditoría 2026-07-03 #3: antes el equity de
+        // cortos abiertos era optimista; el funding solo aparecía de golpe al cerrar).
         const entry = pos.entryPrice ?? pos.buyPrice;
-        const floatPnL = pos.amount * (entry - valuationPrice);
+        const daysHeld = Math.max(0, (Date.now() - new Date(pos.timestamp).getTime()) / 86400000);
+        const fundingAccrued = pos.investedUSDC * (COSTS.fundingDailyShort || 0) * daysHeld;
+        const floatPnL = pos.amount * (entry - valuationPrice) - fundingAccrued;
         investedEquity += pos.investedUSDC + floatPnL;
         unrealizedPnL += floatPnL;
       } else {
@@ -163,9 +181,11 @@ class ShadowTrader {
       unrealizedPnLUSDC: unrealizedPnL.toFixed(2),
       totalProfitUSDC: totalProfit.toFixed(2),         // realizado + latente
       pricedAtMarket,
-      winRate: `${winRate}%`,                          // sobre trades CERRADOS
-      totalTrades,
+      winRate: `${winRate}%`,                          // sobre cierres de SEÑAL (excluye administrativos)
+      totalTrades,                                     // raw: incluye cierres administrativos
       winningTrades,
+      signalTrades,                                    // cierres de estrategia (base del gate de promoción)
+      signalWins,
       openPositionsCount: Object.keys(state.openPositions).length
     };
   }
@@ -259,6 +279,7 @@ class ShadowTrader {
       buyPrice: price,
       entryPrice: price,
       peakPrice: price,
+      lowestLow: price,      // extremo favorable del corto (Chandelier trail, research #9)
       investedUSDC: marginUSDC,
       timestamp: new Date().toISOString(),
     };
@@ -287,17 +308,26 @@ class ShadowTrader {
     const position = state.openPositions[symbol];
     if (!position) return false;
 
+    // Guards anti-NaN (auditoría 2026-07-03 #7): una posición con campos corruptos (edición
+    // manual del blob) puede envenenar balanceUSDC con NaN/null y dejar el canal inoperante.
+    // Mejor abortar el cierre y avisar que persistir un estado roto.
+    if (!Number.isFinite(position.amount) || !Number.isFinite(position.investedUSDC) || !(price > 0)) {
+      console.error(`⚠️ [${this.label}] applySell abortado: posición corrupta en ${symbol} (amount=${position.amount}, invested=${position.investedUSDC}, price=${price})`);
+      return false;
+    }
+
     let profitUSDC, profitPercentage, returnUSDC;
     if (position.side === 'short') {
       // Cubrir corto: P&L = amount·[entry·(1−slip−fee) − price·(1+slip+fee)] − borrow. Devuelve margen + P&L.
       const entry = position.entryPrice ?? position.buyPrice;
       const proceedsEntry = position.amount * entry * (1 - COSTS.slippagePct) - position.amount * entry * COSTS.feePct;
       const costCover = position.amount * price * (1 + COSTS.slippagePct) + position.amount * price * COSTS.feePct;
-      // Coste de financiación del corto (borrow/funding) pro-rata a los días abiertos — paridad
-      // con el motor (executeShortClose). Los cortos reales no son gratis de mantener.
-      const holdDays = Math.max(0, (Date.now() - new Date(position.timestamp).getTime()) / 86400000);
-      const borrowCost = position.amount * entry * (COSTS.shortBorrowDailyPct ?? 0) * holdDays;
-      profitUSDC = proceedsEntry - costCover - borrowCost;
+      // Coste de carry (funding/borrow) por días mantenido el corto (paridad con el motor, #5).
+      // Timestamp inválido → 0 días (no NaN).
+      const ts = new Date(position.timestamp).getTime();
+      const daysHeld = Number.isFinite(ts) ? Math.max(0, (Date.now() - ts) / 86400000) : 0;
+      const fundingCost = position.investedUSDC * (COSTS.fundingDailyShort || 0) * daysHeld;
+      profitUSDC = proceedsEntry - costCover - fundingCost;
       profitPercentage = (profitUSDC / position.investedUSDC) * 100;
       returnUSDC = position.investedUSDC + profitUSDC; // margen + P&L
       state.balanceUSDC += returnUSDC;
