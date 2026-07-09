@@ -137,14 +137,25 @@ class BinanceService {
   /**
    * Velas japonesas (K-lines) para un par y temporalidad. Devuelve [] sólo si la petición
    * falla tras reintentos (el caller debe tratar [] como "sin datos / fallo" y no operar).
+   *
+   * opts.cacheMs > 0 activa una caché en memoria de corta vida (auditoría 2026-07-09): dentro
+   * de una misma invocación del cron, dailyBot y longShortBot piden las MISMAS velas diarias
+   * de la misma cesta → la caché elimina la mitad de las llamadas y acelera la función.
+   * Solo se cachean respuestas exitosas.
    */
-  async getKlines(symbol, interval = '15m', limit = 100, extraParams = {}) {
+  async getKlines(symbol, interval = '15m', limit = 100, extraParams = {}, opts = {}) {
+    const cacheMs = opts.cacheMs || 0;
+    const cacheKey = `${symbol}:${interval}:${limit}:${JSON.stringify(extraParams)}`;
+    if (cacheMs > 0) {
+      const hit = KLINES_CACHE.get(cacheKey);
+      if (hit && Date.now() - hit.at < cacheMs) return hit.data;
+    }
     try {
       const response = await getWithRetry(`${BINANCE_DATA_BASE}/klines`, {
         params: { symbol, interval, limit, ...extraParams }
       });
 
-      return response.data.map(candle => ({
+      const data = response.data.map(candle => ({
         openTime: candle[0],
         open: parseFloat(candle[1]),
         high: parseFloat(candle[2]),
@@ -153,11 +164,19 @@ class BinanceService {
         volume: parseFloat(candle[5]),
         closeTime: candle[6]
       }));
+      if (cacheMs > 0) {
+        if (KLINES_CACHE.size > 200) KLINES_CACHE.clear(); // bound de memoria
+        KLINES_CACHE.set(cacheKey, { at: Date.now(), data });
+      }
+      return data;
     } catch (error) {
       console.error(`Error al obtener Klines para ${symbol}:`, error.message);
       return [];
     }
   }
 }
+
+// Caché module-level de klines (viva mientras dure la invocación/instancia warm)
+const KLINES_CACHE = new Map();
 
 export default new BinanceService();

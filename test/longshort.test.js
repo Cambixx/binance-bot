@@ -59,6 +59,20 @@ test('corto plano pierde ~round-trip (≈0.30%)', () => {
   assert.ok(Math.abs(tr.profitPercentage - expectedPct) < 0.02, `pct=${tr.profitPercentage} vs ${expectedPct}`);
 });
 
+test('corto paga borrow/funding pro-rata a los días abiertos', () => {
+  const t = new ShadowTrader();
+  const s = fakeSession(5000);
+  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  // Backdatear la apertura 10 días para simular un corto mantenido
+  s.state.openPositions['BTCUSDC'].timestamp = new Date(Date.now() - 10 * 86400000).toISOString();
+  t.applySell(s, 'BTCUSDC', 100, 'SIGNAL'); // cubre al mismo precio
+  const tr = s.state.tradeHistory[0];
+  const rtPct = -2 * (COSTS.feePct + COSTS.slippagePct) * 100;          // ≈ -0.30%
+  const borrowPct = -(COSTS.shortBorrowDailyPct * 10) * 100;            // ≈ -0.30% (10d × 0.03%)
+  assert.ok(Math.abs(tr.profitPercentage - (rtPct + borrowPct)) < 0.02,
+    `pct=${tr.profitPercentage} vs ${rtPct + borrowPct}`);
+});
+
 test('el long-only sigue intacto (side=long, mismo comportamiento)', () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
@@ -98,6 +112,22 @@ test('motor long/short: shortea en bajista y gana en la caída', async () => {
   assert.ok(shorts.length >= 1, 'debería haber abierto al menos un corto');
   // Algún corto en la caída debe haber sido ganador
   assert.ok(shorts.some(t => t.profit > 0), 'algún corto debería ganar en la bajada');
+});
+
+test('motor: el borrow reduce el P&L de los cortos (y a 0 lo preserva)', async () => {
+  const up = Array.from({ length: 220 }, (_, i) => 100 + i);
+  const down = Array.from({ length: 80 }, (_, i) => 320 - i * 3);
+  const closes = [...up, ...down];
+  const mk = (shortBorrowDailyPct) => new BacktestEngine({
+    symbols: ['AAAUSDC'], interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal',
+    longShort: true, dataBySymbol: { AAAUSDC: makeDaily(closes) }, bufferSize: 260, minCandles: 205,
+    regimeOpts: { smaPeriod: 150 }, oosSplitRatio: 0.95, shortBorrowDailyPct,
+  });
+  const sumShort = (r) => r.trades.filter(t => t.side === 'short').reduce((s, t) => s + t.profit, 0);
+  const sinBorrow = await mk(0).run();
+  const conBorrow = await mk(0.001).run(); // 0.1%/día, exagerado para hacer visible el efecto
+  assert.ok(sumShort(conBorrow) < sumShort(sinBorrow),
+    `borrow debería reducir el P&L corto: ${sumShort(conBorrow)} vs ${sumShort(sinBorrow)}`);
 });
 
 test('motor long-only NO abre cortos (longShort=false)', async () => {

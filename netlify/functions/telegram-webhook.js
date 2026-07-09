@@ -18,6 +18,8 @@ export default async (req) => {
       console.warn('[Webhook] BLOQUEADO: secret token inválido');
       return new Response('Forbidden', { status: 403 });
     }
+  } else {
+    console.warn('[Webhook] ⚠️ TELEGRAM_WEBHOOK_SECRET no configurado: el endpoint queda protegido solo por chat_id (falsificable). Define el secret y registra el webhook con secret_token.');
   }
 
   try {

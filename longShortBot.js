@@ -49,8 +49,16 @@ async function _runCycle() {
     return frac;
   };
 
+  // Descarga en paralelo + caché compartida con el canal SMA150-1d (misma cesta/ventana en la
+  // misma invocación del cron → 0 llamadas extra). Ventana SMA_PERIOD+61 = paridad vol-target
+  // con el backtest (ver dailyBot.js).
+  const rawBySymbol = {};
+  await Promise.all(monitored.map(async (s) => {
+    rawBySymbol[s] = await binance.getKlines(s, DAILY_INTERVAL, SMA_PERIOD + 61, {}, { cacheMs: 120000 });
+  }));
+
   for (const symbol of monitored) {
-    const raw = await binance.getKlines(symbol, DAILY_INTERVAL, SMA_PERIOD + 11);
+    const raw = rawBySymbol[symbol] || [];
     const klines = raw.length > 0 ? raw.slice(0, -1) : raw;
     if (klines.length < SMA_PERIOD + 1) continue;
 

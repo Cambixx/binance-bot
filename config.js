@@ -63,6 +63,12 @@ export const SMA_HYSTERESIS_BAND = 0.0;
 export const COSTS = {
   feePct: 0.001,        // 0.10% por lado (comisión taker Binance spot)
   slippagePct: 0.0005,  // 0.05% por lado (slippage estimado en 15m altcoins)
+  // Coste de financiación de CORTOS (auditoría 2026-07-09): interés de borrow (margin) o funding
+  // (perp) que un corto real paga mientras está abierto. Se acumula pro-rata sobre el notional de
+  // entrada: coste = amount·entry·shortBorrowDailyPct·díasAbierto, y se resta al P&L al cubrir.
+  // 0.03%/día ≈ funding medio perp / borrow de majors en Binance (conservador). Sin esto el
+  // backtest y el ledger sobreestiman el edge del lado corto (los largos spot no lo pagan).
+  shortBorrowDailyPct: 0.0003,
 };
 
 // ─────────────────────────── Vol-targeting (sizing dinámico) ───────────────────────────

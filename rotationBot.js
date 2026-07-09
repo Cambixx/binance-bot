@@ -41,15 +41,23 @@ async function _runRotationCycle() {
   let symbols = await binance.getTopVolumeSymbols(ROT_UNIVERSE + 5);
   symbols = symbols.filter(s => !isBlacklisted(s)).slice(0, ROT_UNIVERSE);
 
+  // Guarda de integridad (auditoría 2026-07-09): si la API falla, getTopVolumeSymbols cae a un
+  // fallback de 4 monedas → el ranking degenerado sacaría de target (y VENDERÍA) posiciones sanas.
+  // Con universo sospechosamente pequeño se aborta el ciclo y se reintenta en el próximo cron.
+  if (symbols.length < Math.max(ROTATION.topN * 2, 10)) {
+    throw new Error(`Universo degenerado (${symbols.length} símbolos; ¿fallo de API?) — ciclo abortado sin operar.`);
+  }
+
   const needDays = Math.max(ROTATION.lookbackDays, ROTATION.absMomLookback) + 5;
 
-  // Descargar cierres diarios (vela en formación descartada) del universo + BTC para el gate
+  // Descargar cierres diarios (vela en formación descartada) del universo + BTC para el gate.
+  // En paralelo (auditoría 2026-07-09): ~25 símbolos secuenciales arriesgaban el timeout del cron.
   const closesBySymbol = {};
-  for (const sym of symbols) {
+  await Promise.all(symbols.map(async (sym) => {
     const raw = await binance.getKlines(sym, DAILY, needDays + 2);
     const k = raw.length > 1 ? raw.slice(0, -1) : raw;
     if (k.length >= needDays) closesBySymbol[sym] = k.map(c => c.close);
-  }
+  }));
   let btcCloses = null;
   if (ROTATION.useBtcRegime) {
     const raw = await binance.getKlines(REGIME.btcSymbol, DAILY, REGIME.btcSmaPeriod + 5);
@@ -80,7 +88,16 @@ async function _runRotationCycle() {
   console.log(`🎯 [ROT] ${riskOff ? 'RISK-OFF (BTC<SMA) → cash' : 'targets: ' + (targets.join(', ') || '(ninguno)')}`);
 
   const held = Object.keys(state.openPositions);
-  const prices = await binance.getPrices([...new Set([...held, ...targets])]);
+  const needPrices = [...new Set([...held, ...targets])];
+  const prices = await binance.getPrices(needPrices);
+
+  // Guarda de integridad (auditoría 2026-07-09): sin precio de algún símbolo implicado, el
+  // rebalanceo quedaría a medias PERO se estamparía lastRebalanceTime → 14 días con cartera
+  // inconsistente. Mejor abortar sin persistir y reintentar en el próximo cron.
+  const missing = needPrices.filter(s => !(prices[s] > 0));
+  if (missing.length > 0) {
+    throw new Error(`Sin precio para ${missing.join(', ')} — rebalanceo abortado sin operar.`);
+  }
 
   // 1) Vender lo que ya no está en target
   for (const sym of held) {

@@ -48,9 +48,18 @@ async function _runDailyCycle() {
   const monitored = [...new Set([...symbols, ...openSymbols])];
   console.log(`🔍 [SMA${SMA_PERIOD}-1d] Evaluando régimen diario (band ${(SMA_HYSTERESIS_BAND * 100).toFixed(1)}%): ${monitored.join(', ')}`);
 
+  // Velas DIARIAS en PARALELO (auditoría 2026-07-09: antes secuencial → ~8× más lento; el cron
+  // serverless tiene timeout). Ventana = SMA_PERIOD+61 (se descarta la vela en formación → +60
+  // cierres) para PARIDAD EXACTA con el bufferSize del backtest (sp+60): el peso de vol-targeting
+  // (EWMA) ve la misma longitud de serie en live y en backtest. cacheMs: el canal LS reutiliza
+  // estas mismas velas en la misma invocación sin re-descargar.
+  const rawBySymbol = {};
+  await Promise.all(monitored.map(async (s) => {
+    rawBySymbol[s] = await binance.getKlines(s, DAILY_INTERVAL, SMA_PERIOD + 61, {}, { cacheMs: 120000 });
+  }));
+
   for (const symbol of monitored) {
-    // Velas DIARIAS. Pedimos SMA_PERIOD+11 y descartamos la última (vela en formación).
-    const raw = await binance.getKlines(symbol, DAILY_INTERVAL, SMA_PERIOD + 11);
+    const raw = rawBySymbol[symbol] || [];
     const klines = raw.length > 0 ? raw.slice(0, -1) : raw;
     // Guard de histórico: sin suficientes velas no se puede calcular la SMA → se ignora.
     if (klines.length < SMA_PERIOD + 1) continue;

@@ -119,6 +119,10 @@ async function main() {
   // Costes: por defecto los de config.js; --no-costs los anula; --fee/--slippage los sobreescriben
   const feePct = noCosts ? 0 : (feeArg ? parseFloat(feeArg.split('=')[1]) / 100 : COSTS.feePct);
   const slippagePct = noCosts ? 0 : (slipArg ? parseFloat(slipArg.split('=')[1]) / 100 : COSTS.slippagePct);
+  // Borrow/funding de cortos (%/día). --borrow=0.03 lo fija; --no-costs lo anula.
+  const borrowArg = args.find(a => a.startsWith('--borrow='));
+  const shortBorrowDailyPct = noCosts ? 0
+    : (borrowArg ? parseFloat(borrowArg.split('=')[1]) / 100 : COSTS.shortBorrowDailyPct);
 
   const engineOpts = {
     initialBalance,
@@ -133,7 +137,8 @@ async function main() {
     partialExitAtR: partialArg ? parseFloat(partialArg.split('=')[1]) : 0,
     regimeOpts,
     feePct,
-    slippagePct
+    slippagePct,
+    shortBorrowDailyPct
   };
   // La familia diaria necesita ventana grande; el buffer ESCALA con el periodo (fix auditoría:
   // antes 260/210 hardcodeado no escalaba con --sma → SMA150 arrastraba warm-up de SMA250).

@@ -45,14 +45,18 @@ class ShadowTrader {
     };
   }
 
-  async _loadState() {
-    const store = this.getStore();
-    const state = await store.get(this.storeKey, { type: 'json' });
+  _normalizeState(state) {
     if (!state) return this._defaultState();
     if (!state.cooldowns) state.cooldowns = {};
     if (!state.openPositions) state.openPositions = {};
     if (!state.tradeHistory) state.tradeHistory = [];
     return state;
+  }
+
+  async _loadState() {
+    const store = this.getStore();
+    const state = await store.get(this.storeKey, { type: 'json' });
+    return this._normalizeState(state);
   }
 
   async _saveState(state) {
@@ -62,13 +66,28 @@ class ShadowTrader {
 
   // ───────────────────── Sesión transaccional (read-modify-write único) ─────────────────────
 
+  /**
+   * Lee el estado UNA vez y captura su etag para concurrencia optimista (auditoría 2026-07-09):
+   * si dos invocaciones solapadas mutan la misma cartera, solo la primera escritura gana; la
+   * segunda falla en commit (onlyIfMatch) en vez de pisar silenciosamente los trades de la otra.
+   */
   async beginSession() {
-    const state = await this._loadState();
-    return { state, notifications: [] };
+    const store = this.getStore();
+    const res = await store.getWithMetadata(this.storeKey, { type: 'json' });
+    const state = this._normalizeState(res ? res.data : null);
+    return { state, etag: res?.etag, notifications: [] };
   }
 
   async commitSession(session) {
-    await this._saveState(session.state);
+    const store = this.getStore();
+    // Escritura condicional: exige que el blob no haya cambiado desde beginSession.
+    // Sin etag (blob nuevo) exige que siga sin existir (onlyIfNew).
+    const cond = session.etag ? { onlyIfMatch: session.etag } : { onlyIfNew: true };
+    const res = await store.setJSON(this.storeKey, session.state, cond);
+    if (res && res.modified === false) {
+      throw new Error(`[${this.label}] Conflicto de escritura del estado (otra invocación lo modificó); ciclo descartado, se reintenta en el próximo cron.`);
+    }
+    session.etag = res?.etag ?? session.etag;
     for (const msg of session.notifications) {
       try {
         await telegramService.sendMessage(msg);
@@ -270,11 +289,15 @@ class ShadowTrader {
 
     let profitUSDC, profitPercentage, returnUSDC;
     if (position.side === 'short') {
-      // Cubrir corto: P&L = amount·[entry·(1−slip−fee) − price·(1+slip+fee)]. Devuelve margen + P&L.
+      // Cubrir corto: P&L = amount·[entry·(1−slip−fee) − price·(1+slip+fee)] − borrow. Devuelve margen + P&L.
       const entry = position.entryPrice ?? position.buyPrice;
       const proceedsEntry = position.amount * entry * (1 - COSTS.slippagePct) - position.amount * entry * COSTS.feePct;
       const costCover = position.amount * price * (1 + COSTS.slippagePct) + position.amount * price * COSTS.feePct;
-      profitUSDC = proceedsEntry - costCover;
+      // Coste de financiación del corto (borrow/funding) pro-rata a los días abiertos — paridad
+      // con el motor (executeShortClose). Los cortos reales no son gratis de mantener.
+      const holdDays = Math.max(0, (Date.now() - new Date(position.timestamp).getTime()) / 86400000);
+      const borrowCost = position.amount * entry * (COSTS.shortBorrowDailyPct ?? 0) * holdDays;
+      profitUSDC = proceedsEntry - costCover - borrowCost;
       profitPercentage = (profitUSDC / position.investedUSDC) * 100;
       returnUSDC = position.investedUSDC + profitUSDC; // margen + P&L
       state.balanceUSDC += returnUSDC;
@@ -357,7 +380,7 @@ class ShadowTrader {
   async updatePosition(symbol, updates) {
     const session = await this.beginSession();
     this.applyUpdatePosition(session, symbol, updates);
-    await this._saveState(session.state); // sin notificaciones
+    await this.commitSession(session); // sin notificaciones acumuladas; escritura condicional
   }
 }
 

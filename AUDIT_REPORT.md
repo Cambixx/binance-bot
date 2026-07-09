@@ -147,3 +147,46 @@ SELL corre sobre `openSymbols ∪ symbols`, así que las posiciones en mid-caps 
 ### Gate de promoción a capital real (pendiente de datos)
 No mover el diario a real hasta ver **≥6-8 trades CERRADOS con PF>1** en live. Reportar siempre por
 `realizedPnLUSDC`, nunca `totalProfitUSDC` (el latente es surf de toro, no edge).
+
+---
+
+# Anexo: Auditoría 2026-07-09 (código + costes de cortos + resiliencia)
+
+Auditoría completa del código con correcciones aplicadas, validadas con la suite de tests
+(**39/39**) y re-backtests de 40 meses. Baselines pre-cambio: long-only ROI +72.1% / Calmar 0.75;
+long/short ROI +59.4% / Calmar 0.67.
+
+## Correcciones aplicadas
+
+### 🔴 ALTA
+| Hallazgo | Fix |
+|---|---|
+| **Cortos "gratis"**: ni el motor ni el ledger cobraban borrow/funding a los cortos → el edge del canal SMA150-LS estaba sobreestimado (el propio doc lo admitía como "no modelado"). | `COSTS.shortBorrowDailyPct` (0.03%/día × notional entrada × días abiertos) restado al cubrir, en `executeShortClose` (motor) y `applySell` (ledger) → paridad. Flags `--borrow=N`, `--no-costs`. **Impacto 40m: ROI +59.4→+49.0%, Calmar 0.67→0.55, holdout PF 3.4→3.0; walk-forward: ROI mediano +14.4→+8.8%, sigue 4/5 folds ROI>0 y 5/5 PF≥1** → el lado corto sobrevive al coste, pero más modesto. |
+| **Lost-update real en Netlify Blobs**: el patrón transaccional reducía la ventana de carrera pero dos invocaciones solapadas aún podían pisarse trades (last-write-wins). | **Concurrencia optimista**: `beginSession` captura el `etag` y `commitSession` escribe con `onlyIfMatch` (u `onlyIfNew` si el blob no existe). En conflicto, el ciclo aborta SIN notificar y reintenta al siguiente cron. |
+| **Rotación: liquidaciones espurias en fallos de API**: si `getTopVolumeSymbols` fallaba, el fallback de 4 monedas degeneraba el ranking → vendía posiciones sanas; si `getPrices` fallaba, el rebalanceo quedaba a medias PERO `lastRebalanceTime` se estampaba → 14 días de cartera inconsistente. | Guardas de integridad: aborta el ciclo (con alerta Telegram) si el universo es sospechosamente pequeño o falta el precio de algún símbolo implicado. Nada se persiste en fallo. |
+| **Backtest silenciosamente truncado**: un error transitorio a mitad de paginación hacía `break` sin aviso → métricas calculadas sobre datos incompletos. | `fetchHistoricalData` con retry+backoff (honra 429/418/5xx) y **fallo ruidoso** (throw) si la página no se recupera. |
+
+### 🟡 MEDIA
+| Hallazgo | Fix |
+|---|---|
+| Cron lento: dailyBot y longShortBot descargaban **las mismas velas** de la misma cesta, en secuencia (riesgo de timeout serverless con 3 canales). | Descargas **en paralelo** (`Promise.all`) en los 3 bots + **caché de klines** de corta vida en `binanceService` (`{cacheMs}`) → el canal LS reutiliza las velas del diario en la misma invocación (≈mitad de llamadas). |
+| Ventana de cierres live (160) ≠ buffer del backtest (210) → el peso de vol-targeting (EWMA) veía series de longitud distinta. | Bots diarios piden `SMA_PERIOD+61` (⇒ 210 cierres tras descartar la vela en formación) = `bufferSize` del motor → paridad exacta. |
+| `canOpenPosition` medía la exposición del corto como `amount·precio` (nocional) en vez de margen+P&L flotante. | Cálculo side-aware (solo afecta si se activan los caps). |
+| `updatePosition` legacy escribía sin condición (podía pisar un commit concurrente). | Enrutado por `commitSession` condicional. |
+| Vulnerabilidades npm: `form-data` (high, CVE de CRLF injection — dependencia de axios) y `tmp` (high). | `npm audit fix` aplicado; quedan 6 moderadas transitivas (`@opentelemetry/core` vía `@netlify/blobs`, fix = downgrade breaking; riesgo práctico bajo, sin exposición a baggage headers entrantes). |
+
+### 🟢 BAJA
+| Hallazgo | Fix |
+|---|---|
+| Webhook sin `TELEGRAM_WEBHOOK_SECRET` queda protegido solo por chat_id (falsificable). | `console.warn` explícito en cada invocación sin secret (los comandos son read-only; configurar el secret sigue recomendado). |
+
+## Mejoras evaluadas y RECHAZADAS (con datos)
+- **Banda de histéresis SMA** (0.5/1/2% vs 0, 40m long-only): ninguna bate a band=0 en
+  ROI/Calmar full (72.1%/0.75 vs 61.6%/0.72 la mejor, band=2); el holdout mejora marginalmente
+  (PF 1.55→1.65) pero no compensa resetear la observación shadow live. Coherente con el rechazo
+  de la auditoría 2026-06-19. **Se mantiene `SMA_HYSTERESIS_BAND = 0`.**
+
+## Estado del riesgo live
+Ningún cambio toca posiciones abiertas ni el formato del estado en blobs (solo se añade el etag
+en memoria durante la sesión). El borrow solo afecta a cierres de cortos FUTUROS del canal LS
+(shadow). La ventana 210 cambia marginalmente el peso de vol-targeting de NUEVAS entradas.

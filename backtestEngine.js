@@ -46,6 +46,9 @@ class BacktestEngine {
     // Costes de transacción (fees + slippage) — netados en cada trade. Ver config.js / auditoría.
     this.feePct = options.feePct ?? COSTS.feePct;
     this.slippagePct = options.slippagePct ?? COSTS.slippagePct;
+    // Coste de financiación de cortos (borrow/funding), %/día sobre el notional de entrada.
+    // Solo afecta al modo long/short; los largos spot no lo pagan (auditoría 2026-07-09).
+    this.shortBorrowDailyPct = options.shortBorrowDailyPct ?? COSTS.shortBorrowDailyPct ?? 0;
 
     // Exit mode: 'fixed' = TP/SL/trailing% clásicos | 'atr' = Chandelier (ATR-based) + ATR SL
     this.exitMode = options.exitMode || 'fixed';
@@ -108,36 +111,51 @@ class BacktestEngine {
     const msInMonth = 30 * 24 * 60 * 60 * 1000;
     const endTime = Date.now();
     const startTime = endTime - (this.months * msInMonth);
-    
+
     let allKlines = [];
     let currentStartTime = startTime;
 
     console.log(`📥 Descargando datos para ${symbol}...`);
 
     while (currentStartTime < endTime) {
-      try {
-        const response = await axios.get(`${BINANCE_API_BASE}/klines`, {
-          params: { symbol, interval: this.interval, limit, startTime: currentStartTime }
-        });
-
-        const klines = response.data;
-        if (klines.length === 0) break;
-
-        allKlines = allKlines.concat(klines.map(k => ({
-          time: k[0],
-          open: parseFloat(k[1]),
-          high: parseFloat(k[2]),
-          low: parseFloat(k[3]),
-          close: parseFloat(k[4]),
-          volume: parseFloat(k[5])
-        })));
-
-        currentStartTime = klines[klines.length - 1][0] + 1;
-        if (klines.length < limit) break;
-      } catch (error) {
-        console.error(`Error descargando data para ${symbol}:`, error.message);
-        break;
+      // Retry con backoff (auditoría 2026-07-09): antes un fallo transitorio hacía `break`
+      // SILENCIOSO a mitad de paginación → dataset truncado → métricas de backtest erróneas
+      // sin aviso. Ahora se reintenta y, si aun así falla, se lanza (fallo ruidoso > dato falso).
+      let klines = null, lastErr = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          const response = await axios.get(`${BINANCE_API_BASE}/klines`, {
+            params: { symbol, interval: this.interval, limit, startTime: currentStartTime },
+            timeout: 15000,
+          });
+          klines = response.data;
+          break;
+        } catch (error) {
+          lastErr = error;
+          const status = error.response?.status;
+          const retryable = !status || status === 429 || status === 418 || status >= 500;
+          if (!retryable || attempt === 3) break;
+          const delay = 500 * 2 ** attempt + Math.floor(Math.random() * 200);
+          console.warn(`⚠️ ${symbol}: intento ${attempt + 1} falló (${status || error.code}); reintento en ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+        }
       }
+      if (klines === null) {
+        throw new Error(`Descarga incompleta para ${symbol} (${lastErr?.message}); backtest abortado para no computar sobre datos truncados.`);
+      }
+      if (klines.length === 0) break;
+
+      allKlines = allKlines.concat(klines.map(k => ({
+        time: k[0],
+        open: parseFloat(k[1]),
+        high: parseFloat(k[2]),
+        low: parseFloat(k[3]),
+        close: parseFloat(k[4]),
+        volume: parseFloat(k[5])
+      })));
+
+      currentStartTime = klines[klines.length - 1][0] + 1;
+      if (klines.length < limit) break;
     }
 
     console.log(`   ✅ ${allKlines.length} velas descargadas para ${symbol}`);
@@ -349,7 +367,9 @@ class BacktestEngine {
       let invested = 0;
       for (const s in this.state.openPositions) {
         const p = this.state.openPositions[s];
-        invested += p.amount * (currentPrices[s] || p.buyPrice);
+        const mkt = currentPrices[s] || p.buyPrice;
+        // Side-aware: el corto expone margen + P&L flotante, no amount·precio (auditoría 2026-07-09)
+        invested += p.side === 'short' ? p.invested + p.amount * (p.entryPrice - mkt) : p.amount * mkt;
       }
       if (eq > 0 && invested / eq >= this.maxExposurePct) return false;
     }
@@ -403,7 +423,7 @@ class BacktestEngine {
     };
   }
 
-  // Cierra un CORTO (buy-to-cover). P&L corto = amount·[entry·(1−slip−fee) − price·(1+slip+fee)].
+  // Cierra un CORTO (buy-to-cover). P&L = amount·[entry·(1−slip−fee) − price·(1+slip+fee)] − borrow.
   executeShortClose(symbol, price, time, reason) {
     const pos = this.state.openPositions[symbol];
     if (!pos || pos.side !== 'short') return;
@@ -411,7 +431,10 @@ class BacktestEngine {
     const slip = this.slippagePct, fee = this.feePct;
     const proceedsEntry = pos.amount * entry * (1 - slip) - pos.amount * entry * fee; // vender al abrir
     const costCover = pos.amount * price * (1 + slip) + pos.amount * price * fee;     // comprar al cerrar
-    const profit = proceedsEntry - costCover;
+    // Borrow/funding del corto pro-rata a los días abiertos (paridad con shadowTrader.applySell).
+    const holdDays = Math.max(0, (time - new Date(pos.time).getTime()) / 86400000);
+    const borrowCost = pos.amount * entry * this.shortBorrowDailyPct * holdDays;
+    const profit = proceedsEntry - costCover - borrowCost;
     const profitPct = (profit / pos.invested) * 100;
     this.state.balance += pos.invested + profit;
 
