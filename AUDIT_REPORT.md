@@ -325,3 +325,52 @@ Validada con la suite de tests y re-backtests de 40 meses.
 Ningún cambio toca posiciones abiertas ni el formato del estado en blobs (solo se añade el etag
 en memoria durante la sesión). La ventana 210 cambia marginalmente el peso de vol-targeting de
 NUEVAS entradas.
+
+---
+
+## 11. Research de ROI 2026-07-10 (torneo pareado de 3 candidatas)
+
+Investigación online + torneo `abtest.js` (42m, 8 folds, funding real, mismos folds/datos para
+todas las variantes) buscando mejorar el ROI sin violar la regla de la casa (gate pareado:
+Calmar mediano ≥, IQR ≤, peor fold no peor; meseta, no pico; parámetros fijados a priori).
+
+**Evidencia externa revisada antes de diseñar candidatas:** en cripto neto de costes el momentum
+de serie temporal (TSMOM) tiene evidencia fuerte y el cross-sectional débil (Han-Kang-Ryu, SSRN
+4675565) → el núcleo SMA del bot está bien elegido y NO se construyó tilt cross-sectional. Las
+señales continuas tipo Carver reducen churn/costes vs binarias. Vol-managed (Moreira-Muir) ya
+estaba implementado (vol-target). Donchian: ya aplazado (Tier 3 #12).
+
+### Candidatas (implementadas como opciones del motor, off por defecto)
+| Candidata | Regla (a priori) | Opción del engine |
+|---|---|---|
+| GATE | No abrir LARGOS nuevos si BTC < SMA200 diaria (los cortos no se tocan) | `btcGateLong: {smaPeriod}` |
+| PYR | Piramidación Turtle en largos: tranche extra al confirmar +10%, máx 2 añadidos | `pyramid: {stepPct, maxAdds}` |
+| TILT | Sizing continuo Carver-lite al abrir: z = \|ln(close/SMA)\|/(σ20d·√30), clamp [0.25, 1] | `entryTilt: {horizonDays, floor}` |
+
+### Resultados (holdout por fold, pareado)
+**Canal LS (SMA150-LS):**
+| Variante | CalmarMed | IQR | Peor | SharpeMed | ROIMed | Veredicto |
+|---|---|---|---|---|---|---|
+| baseline | 2.37 | 3.48 | −1.89 | 1.04 | 10.0% | — |
+| **GATE btc>sma200** | **3.19** | 3.49* | −1.88 | **1.38** | **12.2%** | ✅ (meseta 200/220/250 idénticos; *el "IQR↑" de 0.01 es artefacto float de la tolerancia) |
+| PYR 10%×2 | 2.36 | 3.93 | −1.84 | 1.03 | 8.3% | 🔻 Calmar< IQR↑ ROI↓ |
+| TILT | 2.43 | 3.91 | −2.04 | 1.11 | 5.8% | 🔻 IQR↑ peor↓ ROI↓↓ |
+| PYR+TILT | 2.42 | 3.27 | −1.85 | 1.10 | 8.7% | pasa el gate formal pero ROI med↓ y no replica en long-only → no adoptado |
+
+**Canal long-only (SMA150-1d):** GATE ✅ (Calmar 4.22→4.32, ROI med 16.6→18.3); PYR/TILT 🔻 (Calmar<).
+
+### Anatomía de la mejora del GATE (honesta, fold a fold)
+La ganancia se concentra en los **rallies de bear market** (el filtro lento de BTC bloquea los
+largos-whipsaw que el SMA150 por-moneda sí toma): en el fold 2026-02→07 (bear actual) el LS pasa
+de +8.4% a **+12.2%** y el long-only de −2.4% a **0% (100% cash)**; en el fold choppy 2024 cuesta
+~1.6pp; el resto ≈neutral. Mecanismo = dual momentum / switch maestro (investigación §2.2, que ya
+lo proponía con evidencia alta y estaba SIN cablear). Meseta verificada con buffer 310: SMA
+200/220/250 dan resultados casi idénticos; 180 es inerte (redundante con el SMA150 por-moneda).
+⚠️ Caveat estadístico: en long-only el fold en cash (0 trades) queda excluido de la mediana del
+resumen (sesgo mecánico a favor); la comparación fold-a-fold económica sigue favoreciendo al gate.
+
+### Adopción (paridad live↔backtest)
+`REGIME.btcEnabled = true` (config). Motor: default `btcGateLong` desde `REGIME` (fail-open sin
+histórico/BTC). Live: `dailyBot.js` y `longShortBot.js` calculan `btcRegimeOn` con las velas de
+BTC ya descargadas y bloquean solo APERTURAS de largos. Tests nuevos en `test/roi-research.test.js`
+(54/54 en verde). PYR/TILT quedan como opciones del motor para re-tests futuros.

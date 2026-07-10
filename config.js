@@ -116,11 +116,16 @@ export const VOLTARGET = {
 
 // ─────────────────────────── Filtro maestro de régimen BTC ───────────────────────────
 // Interruptor global risk-on/off (investigación §2.2): si BTC < SMA(period), no se abren
-// nuevas posiciones en NINGÚN canal. Barato y de alto impacto (BTC cruza su SMA pocas veces/año).
+// LARGOS nuevos (los cortos del canal LS no se tocan). Barato y de alto impacto.
+// ✅ ADOPTADO 2026-07-10 tras torneo pareado (abtest, 42m, 8 folds, funding real): meseta en
+// SMA 200-250 (180 inerte, no es pico). LS: Calmar mediano 2.37→3.19, Sharpe 1.04→1.38, ROI
+// mediano 10.0→12.2. Long-only: Calmar 4.22→4.32, ROI mediano 16.6→18.3. La ganancia se
+// concentra en rallies de bear market (el fold 2026 pasa de −2.4% a cash/0% en long-only y
+// de +8.4% a +12.2% en LS); coste ~1.6pp en el fold choppy 2024. Detalle en AUDIT_REPORT §11.
 export const REGIME = {
-  btcEnabled: false,       // activar el gate maestro BTC
+  btcEnabled: true,        // gate maestro BTC para entradas LARGAS (live + backtest)
   btcSymbol: 'BTCUSDC',
-  btcSmaPeriod: 200,       // SMA diaria de BTC para el switch
+  btcSmaPeriod: 200,       // SMA diaria de BTC para el switch (meseta 200-250; no optimizar fino)
 };
 
 // ─────────────────────────── Rotación cross-sectional + dual-momentum ───────────────────────────

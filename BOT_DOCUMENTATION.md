@@ -45,6 +45,8 @@ Reconvierte el hueco del parado V4C-15m. Misma señal de régimen SMA150 que el 
 "always-in": en bajista abre **CORTO** en vez de ir a cash (flip largo↔corto en el cruce). El usuario
 opera a mano (corto y largo); el bot le da la señal de lado.
 
+**Gate maestro BTC para largos (✅ research 2026-07-10, `config.REGIME`):** no se abren largos nuevos si BTC < SMA200 diaria (los cortos y las salidas no se tocan). Torneo pareado 42m/8 folds: Calmar mediano 2.37→3.19, Sharpe 1.04→1.38, ROI mediano 10.0→12.2 en LS (meseta SMA 200-250); también pasa el gate en long-only. Detalle en AUDIT_REPORT §11.
+
 **Gestión de riesgo del corto (auditoría 2026-06-26, bloque `config.LONGSHORT`):**
 - **Funding/borrow modelado** (`COSTS.fundingDailyShort` 0.03%/día ≈ 11%/año): un corto real paga carry. Sin esto el backtest sobreestimaba ~10pp de ROI.
 - **Catastrophe-stop del corto** (`shortStopPct` 25%): cubre si el precio sube ≥25% sobre la entrada → acota el riesgo de cola (squeeze / rebote en V mientras la SMA tarda en cruzar) y evita que un corto pierda >100% del margen. **Es red de seguridad, no optimización**: un barrido mostró que stops ajustados (8/10/12%) son no-monotónicos = overfit; el 25% no dispara en la muestra (0 stops) pero protege en live.
@@ -237,7 +239,7 @@ Al abrirlo en el navegador verás:
 *   **`backtestEngine.js`:** Motor. Descarga paginada, cronología unificada, dispatcher por versión, exits `fixed`/`atr`/`signal`, split train/holdout, MaxDD **por-vela**, métricas riesgo-ajustadas (Sharpe/Sortino/Calmar), benchmarks (cesta equiponderada + BTC HODL), vol-targeting opcional y caps. Exporta `STRATEGY_NAMES`/`strategyName`.
 *   **`backtest.js`:** Runner de consola (flags CLI, JSON, HTML).
 *   **`bot.js`:** Canal 15m (V4C-COMBO) — **PARADO**, conservado como referencia. Transaccional, salidas vía `exits.js`.
-*   **`dailyBot.js`:** Canal diario SMA150 LONG-ONLY. Transaccional, idempotente intra-día, vol-targeting, alerta de fallo.
+*   **`dailyBot.js`:** Canal diario SMA150 LONG-ONLY. Transaccional, idempotente intra-día, vol-targeting, alerta de fallo. **Gate maestro BTC** (✅ 2026-07-10, `REGIME.btcEnabled`): si BTC < SMA200 diaria no se abren largos nuevos (la gestión/ventas no se toca) — bloquea los largos-whipsaw de los rallies de bear market; validado en torneo pareado (AUDIT_REPORT §11).
 *   **`longShortBot.js`:** Canal SMA150 LONG/SHORT always-in (`longShortTrader`, blob `bot_state_ls_v1`). Flip largo↔corto en el cruce de la SMA; `LONGSHORT_ENABLED=false` lo apaga. Ver §1.3.
 *   **`rotationBot.js`:** Canal de rotación cross-sectional + dual-momentum (experimental, `ROTATION_ENABLED`). Con **guardas de integridad** (auditoría 2026-07-09): aborta el ciclo sin operar ni estampar `lastRebalanceTime` si el universo viene degenerado (fallo de API → fallback de 4 monedas provocaría liquidaciones espurias) o si falta el precio de algún símbolo implicado en el rebalanceo.
 *   **`shadowTrader.js`:** Estado en **Netlify Blobs** con patrón transaccional y **concurrencia optimista** (auditoría 2026-07-09: `beginSession` captura el etag del blob y `commitSession` escribe con `onlyIfMatch` → dos invocaciones solapadas ya no pueden pisarse trades; la perdedora aborta y reintenta al siguiente cron). **Side-aware** (`applyBuy` largo / `applyShort` corto / `applySell` cierra ambos y cobra el funding del corto / `getStats` valora cortos a margen+P&L con funding devengado). Cada canal su cartera (`storeKey`/`label`). Costes en ambos lados, `profitUSDC` numérico, escape HTML.

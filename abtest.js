@@ -25,17 +25,21 @@ SYMBOLS = SYMBOLS.filter(s => !BLACKLIST.some(b => s.includes(b)));
 
 // ─────────── TORNEO: baseline + variantes (opts = overrides del engine sobre lsBaseEngineOpts) ───────────
 // El baseline SIEMPRE va primero. Edita esta lista para cada experimento.
-// Baseline = config actual (confirm3d + ATR-trail 3.0 + funding real). Se prueban #6/#7a ENCIMA.
+// TORNEO research 2026-07-10 (búsqueda de ROI, parámetros fijados a priori — no barrer fino):
+//  - PYR:  piramidación Turtle en largos (tranche extra al confirmar +10%, máx 2 añadidos).
+//  - TILT: sizing continuo tipo Carver al abrir (fuerza de tendencia en unidades de σ).
+//  - GATE: gate maestro BTC>SMA200 para largos nuevos (investigación §2.2, aún sin cablear).
+// --longonly corre el mismo torneo sobre el canal long-only (SMA150-1d, canal del usuario).
+const LONG_ONLY = args.includes('--longonly');
+// Meseta del gate BTC con buffer amplio (310) para que TODAS las SMAs sean computables;
+// el baseline usa el MISMO buffer para que la comparación pareada sea justa.
+const BUF = { bufferSize: 310 };
 const VARIANTS = [
-  { name: 'baseline (adoptado)', opts: {} },
-  // #7a: de-risk del corto en PÁNICO (BTC 60d < −30% Y vol > P80) → corto al 50%
-  { name: '#7a panic-derisk', opts: { panicDerisk: { btcLookback: 60, btcThreshold: -0.30, volPct: 0.80, multiplier: 0.5 } } },
-  // #6: kill-switch de funding negativo persistente (30d acumulado < 0) → corto al 50%
-  { name: '#6 funding-kill', opts: { fundingKill: { avgDays: 30, threshold: 0, multiplier: 0.5 } } },
-  { name: '#6+#7a combinado', opts: {
-    panicDerisk: { btcLookback: 60, btcThreshold: -0.30, volPct: 0.80, multiplier: 0.5 },
-    fundingKill: { avgDays: 30, threshold: 0, multiplier: 0.5 },
-  } },
+  { name: 'baseline (buf310)', opts: { ...BUF } },
+  { name: 'GATE btc>sma180', opts: { ...BUF, btcGateLong: { smaPeriod: 180 } } },
+  { name: 'GATE btc>sma200', opts: { ...BUF, btcGateLong: { smaPeriod: 200 } } },
+  { name: 'GATE btc>sma220', opts: { ...BUF, btcGateLong: { smaPeriod: 220 } } },
+  { name: 'GATE btc>sma250', opts: { ...BUF, btcGateLong: { smaPeriod: 250 } } },
 ];
 
 function pad(v, n) { return String(v ?? '—').padEnd(n); }
@@ -56,7 +60,9 @@ async function main() {
 
   const results = [];
   for (const v of VARIANTS) {
-    const engineOpts = lsBaseEngineOpts({ months: MONTHS, fundingSeries, ...v.opts });
+    // --longonly: mismo stack pero sin la pata corta (canal SMA150-1d del usuario).
+    const modeExtra = LONG_ONLY ? { longShort: false } : {};
+    const engineOpts = lsBaseEngineOpts({ months: MONTHS, fundingSeries, ...modeExtra, ...v.opts });
     const { rows, summary } = await runWalkForward(dataBySymbol, { folds: FOLDS, engineOpts });
     results.push({ ...v, rows, summary });
     console.error(`   ✓ ${v.name}`);

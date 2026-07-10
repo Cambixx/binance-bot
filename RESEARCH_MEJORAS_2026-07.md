@@ -9,6 +9,15 @@
 > 🔻 Rechazado por el gate (media↑ pero IQR↑, o sin efecto): #3 κ=0.5, #4 vt-condicional, #6 funding-kill, #7b veto, #8A banda, #9 time-stop.
 > 💤 Dormante (off): #7a panic-derisk (no gatilló). ⏸️ Aplazado: #5 (desajuste arquitectónico), Tier 3 #10/#11/#12.
 > Neto: walk-forward LS de **Calmar 2.67 / IQR 4.27** → **Calmar 3.63 / IQR 3.5**.
+>
+> **RONDA 2026-07-10 (research de ROI) → ledger en `AUDIT_REPORT.md` §11:**
+> ✅ Adoptado: **gate maestro BTC>SMA200 para largos nuevos** (`REGIME.btcEnabled=true`, era la
+> mejora §2.2 pendiente de cablear): LS Calmar med 2.37→3.19 / ROI med 10.0→12.2; long-only
+> Calmar 4.22→4.32 / ROI med 16.6→18.3; meseta en SMA 200-250. 🔻 Rechazado por el gate:
+> piramidación Turtle 10%×2 (Calmar< y ROI med↓) y sizing continuo Carver-lite al abrir (IQR↑,
+> peor fold↓, ROI med↓↓) — ambos quedan disponibles como opciones del motor (`pyramid`,
+> `entryTilt`) para re-tests. Evidencia externa revisada: TSMOM fuerte / cross-sectional débil
+> en cripto neto de costes (Han-Kang-Ryu) → no construir tilt cross-sectional.
 
 # PLAN DE MEJORAS PRIORIZADO (solo ideas con verdict credible && addsValue)
 

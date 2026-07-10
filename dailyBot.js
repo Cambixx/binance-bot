@@ -1,8 +1,8 @@
 import binance from './binanceService.js';
 import { dailyTrader } from './shadowTrader.js';
 import telegramService from './telegramService.js';
-import { evaluateStrategySMA200, computeVolTargetWeight } from './indicators.js';
-import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK } from './config.js';
+import { evaluateStrategySMA200, computeVolTargetWeight, btcRegimeOn } from './indicators.js';
+import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, REGIME } from './config.js';
 
 /**
  * BOT DIARIO — Market-timing de régimen SMA (estilo Faber). CANAL PARALELO al 15m.
@@ -54,9 +54,21 @@ async function _runDailyCycle() {
   // (EWMA) ve la misma longitud de serie en live y en backtest. cacheMs: el canal LS reutiliza
   // estas mismas velas en la misma invocación sin re-descargar.
   const rawBySymbol = {};
-  await Promise.all(monitored.map(async (s) => {
+  const toFetch = [...new Set([...monitored, ...(REGIME.btcEnabled ? [REGIME.btcSymbol] : [])])];
+  await Promise.all(toFetch.map(async (s) => {
     rawBySymbol[s] = await binance.getKlines(s, DAILY_INTERVAL, SMA_PERIOD + 61, {}, { cacheMs: 120000 });
   }));
+
+  // Gate maestro BTC para entradas LARGAS (✅ adoptado 2026-07-10, paridad con el engine):
+  // si BTC < SMA200, no se abren largos nuevos (las ventas/gestión no se tocan). Fail-open
+  // si no hay histórico suficiente de BTC (btcRegimeOn devuelve true).
+  let btcRiskOn = true;
+  if (REGIME.btcEnabled) {
+    const btcRaw = rawBySymbol[REGIME.btcSymbol] || [];
+    const btcCloses = (btcRaw.length > 0 ? btcRaw.slice(0, -1) : btcRaw).map(k => k.close);
+    btcRiskOn = btcRegimeOn(btcCloses, REGIME.btcSmaPeriod);
+    if (!btcRiskOn) console.log(`⛔ [SMA${SMA_PERIOD}-1d] Gate BTC: BTC < SMA${REGIME.btcSmaPeriod} → no se abren largos nuevos este ciclo.`);
+  }
 
   for (const symbol of monitored) {
     const raw = rawBySymbol[symbol] || [];
@@ -71,7 +83,7 @@ async function _runDailyCycle() {
     const hasPos = !!session.state.openPositions[symbol];
     const canOpen = symbols.includes(symbol);
 
-    if (signal === 'BUY' && !hasPos && canOpen && !isBlacklisted(symbol)) {
+    if (signal === 'BUY' && !hasPos && canOpen && btcRiskOn && !isBlacklisted(symbol)) {
       // Vol-targeting por-canal (paridad con el engine: frac=positionSizePct·w, 0 si w<=minWeight).
       const w = computeVolTargetWeight(closes, { ...VOLTARGET, periodsPerYear: 365 });
       let frac = RISK.positionSizePct * w;

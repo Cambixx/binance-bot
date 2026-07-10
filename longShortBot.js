@@ -1,8 +1,8 @@
 import binance from './binanceService.js';
 import { longShortTrader } from './shadowTrader.js';
 import telegramService from './telegramService.js';
-import { evaluateStrategySMA200, computeVolTargetWeight, shortEntryAllowed, calculateATR } from './indicators.js';
-import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT } from './config.js';
+import { evaluateStrategySMA200, computeVolTargetWeight, shortEntryAllowed, calculateATR, btcRegimeOn } from './indicators.js';
+import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT, REGIME } from './config.js';
 
 /**
  * CANAL LONG/SHORT — SMA150 "always-in-the-market" (reconvierte el hueco del parado V4C-15m).
@@ -55,9 +55,20 @@ async function _runCycle() {
   // misma invocación del cron → 0 llamadas extra). Ventana SMA_PERIOD+61 = paridad vol-target
   // con el backtest (ver dailyBot.js).
   const rawBySymbol = {};
-  await Promise.all(monitored.map(async (s) => {
+  const toFetch = [...new Set([...monitored, ...(REGIME.btcEnabled ? [REGIME.btcSymbol] : [])])];
+  await Promise.all(toFetch.map(async (s) => {
     rawBySymbol[s] = await binance.getKlines(s, DAILY_INTERVAL, SMA_PERIOD + 61, {}, { cacheMs: 120000 });
   }));
+
+  // Gate maestro BTC para entradas LARGAS (✅ adoptado 2026-07-10, paridad con el engine).
+  // Solo bloquea ABRIR largos: los flips de cierre y todo el lado corto no se tocan.
+  let btcRiskOn = true;
+  if (REGIME.btcEnabled) {
+    const btcRaw = rawBySymbol[REGIME.btcSymbol] || [];
+    const btcCloses = (btcRaw.length > 0 ? btcRaw.slice(0, -1) : btcRaw).map(k => k.close);
+    btcRiskOn = btcRegimeOn(btcCloses, REGIME.btcSmaPeriod);
+    if (!btcRiskOn) console.log(`⛔ [SMA${SMA_PERIOD}-LS] Gate BTC: BTC < SMA${REGIME.btcSmaPeriod} → no se abren largos nuevos este ciclo.`);
+  }
 
   for (const symbol of monitored) {
     const raw = rawBySymbol[symbol] || [];
@@ -106,7 +117,7 @@ async function _runCycle() {
         console.log(`🟢 [SMA${SMA_PERIOD}-LS] FLIP a LARGO: cubrir corto ${symbol} a ${price}`);
         longShortTrader.applySell(session, symbol, price, 'SIGNAL');
       }
-      if (inBasket && !session.state.openPositions[symbol] && frac > 0 && canOpenLive(session.state)) {
+      if (inBasket && btcRiskOn && !session.state.openPositions[symbol] && frac > 0 && canOpenLive(session.state)) {
         console.log(`🟢 [SMA${SMA_PERIOD}-LS] LARGO ${symbol} a ${price} (size ${(frac * 100).toFixed(0)}%)`);
         longShortTrader.applyBuy(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
       }

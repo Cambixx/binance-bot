@@ -9,7 +9,7 @@ import {
 } from './indicators.js';
 import { evaluateFixedExit } from './exits.js';
 import binance, { cumRateAt } from './binanceService.js';
-import { BLACKLIST, RISK, COSTS, LOOKBACK_15M, LONGSHORT } from './config.js';
+import { BLACKLIST, RISK, COSTS, LOOKBACK_15M, LONGSHORT, REGIME } from './config.js';
 
 const BINANCE_API_BASE = 'https://data-api.binance.vision/api/v3';
 
@@ -75,6 +75,23 @@ class BacktestEngine {
     // ({SPOT: [{t,cum}]}) o el run() la descarga para los símbolos del universo.
     this.fundingMode = options.fundingMode ?? 'flat';
     this.fundingSeries = options.fundingSeries || null;
+    // ── Candidatas research 2026-07-10 (torneo abtest; off por defecto) ──
+    // pyramid: piramidación estilo Turtle en LARGOS (solo exitMode 'signal'): añade una tranche
+    // cuando el precio confirma la tendencia subiendo stepPct sobre la última entrada/añadido.
+    // { stepPct: 0.10, maxAdds: 2 } — parámetros fijados a priori, no barrer fino.
+    this.pyramid = options.pyramid ?? null;
+    // entryTilt: sizing continuo tipo Carver al ABRIR — multiplica el tamaño por la fuerza de
+    // tendencia z = |ln(close/SMA)| / (σ20d·√horizonDays), clamp [floor, 1]. Señal débil (cruce
+    // fresco) → entra pequeño; señal fuerte → tamaño pleno. { horizonDays: 30, floor: 0.25 }.
+    this.entryTilt = options.entryTilt ?? null;
+    // btcGateLong: gate maestro BTC para entradas LARGAS (investigación §2.2 / REGIME): si el
+    // cierre de BTC < SMA(period), no abrir largos nuevos. { smaPeriod: 200 }.
+    // ✅ ADOPTADO 2026-07-10: default desde config.REGIME (paridad live↔backtest). Pasar
+    // btcGateLong: null para desactivarlo explícitamente. Fail-open si el buffer no alcanza
+    // para la SMA (p.ej. 15m con LOOKBACK_15M=130) o si BTC no está en el universo.
+    this.btcGateLong = options.btcGateLong !== undefined
+      ? options.btcGateLong
+      : (REGIME.btcEnabled ? { smaPeriod: REGIME.btcSmaPeriod } : null);
 
     // Exit mode: 'fixed' = TP/SL/trailing% clásicos | 'atr' = Chandelier (ATR-based) + ATR SL
     this.exitMode = options.exitMode || 'fixed';
@@ -339,7 +356,12 @@ class BacktestEngine {
         }
         if (signal === 'BUY') {
           if (pos && pos.side === 'short') this.executeShortClose(symbol, close, time, 'SIGNAL');
-          if (!this.state.openPositions[symbol] && this.canOpenPosition(currentPrices)) this.executeBuy(symbol, close, time, null, buf);
+          const cur = this.state.openPositions[symbol];
+          if (!cur && this.canOpenPosition(currentPrices) && this.longEntryAllowed()) {
+            this.executeBuy(symbol, close, time, null, buf);
+          } else if (cur && cur.side === 'long') {
+            this.tryPyramidAdd(symbol, close, buf, currentPrices); // candidata pyramid (no-op si off)
+          }
         } else if (signal === 'SELL') {
           if (pos && pos.side === 'long') this.executeSell(symbol, close, time, 'SIGNAL');
           // No re-shortear durante el cooldown post-stop, y solo si el filtro de entrada lo permite.
@@ -352,12 +374,17 @@ class BacktestEngine {
       }
 
       // Lógica de Compra (con caps de cartera, fix #26)
-      if (signal === 'BUY' && !hasPosition && !isOnCooldown && this.canOpenPosition(currentPrices)) {
+      if (signal === 'BUY' && !hasPosition && !isOnCooldown && this.canOpenPosition(currentPrices) && this.longEntryAllowed()) {
         // Si modo ATR, anclar SL/peak iniciales con ATR del momento
         const entryATR = this.exitMode === 'atr'
           ? this.getCurrentATR(buf)
           : null;
         this.executeBuy(symbol, close, time, entryATR, buf);
+      }
+      // Piramidación (candidata research 2026-07-10): tranche extra en tendencia confirmada.
+      // Solo exitMode 'signal' (familia diaria): los exits TP/SL % asumen una sola entrada.
+      else if (signal === 'BUY' && hasPosition && this.exitMode === 'signal') {
+        this.tryPyramidAdd(symbol, close, buf, currentPrices);
       }
       // Lógica de Venta por señal
       else if (signal === 'SELL' && hasPosition) {
@@ -421,15 +448,71 @@ class BacktestEngine {
     return frac;
   }
 
+  // SMA simple del último valor sobre los últimos n cierres (helper local).
+  _smaLast(closes, n) {
+    if (!closes || closes.length < n) return null;
+    let s = 0;
+    for (let i = closes.length - n; i < closes.length; i++) s += closes[i];
+    return s / n;
+  }
+
+  // Gate maestro BTC para entradas LARGAS (candidata btcGateLong): si BTC < SMA(period), no se
+  // abren largos nuevos. Sin datos suficientes de BTC → no bloquear (fail-open, igual que btcRegimeOn).
+  longEntryAllowed() {
+    if (!this.btcGateLong || !this._btcKey || !this._candleBuffers?.[this._btcKey]) return true;
+    const c = this._candleBuffers[this._btcKey].closes;
+    const sma = this._smaLast(c, this.btcGateLong.smaPeriod ?? 200);
+    return sma == null ? true : c[c.length - 1] > sma;
+  }
+
+  // Multiplicador de fuerza de tendencia al abrir (candidata entryTilt, Carver-lite):
+  // z = |ln(close/SMA)| en unidades de σ del horizonte; clamp [floor, 1]. Side-agnóstico.
+  entryTiltMult(buf) {
+    if (!this.entryTilt || !buf) return 1;
+    const closes = buf.closes;
+    const sma = this._smaLast(closes, this.regimeOpts.smaPeriod ?? 150);
+    if (!(sma > 0)) return 1;
+    const vol = dailyVol(closes, 20);
+    if (!Number.isFinite(vol) || vol <= 0) return 1;
+    const H = this.entryTilt.horizonDays ?? 30;
+    const z = Math.abs(Math.log(closes[closes.length - 1] / sma)) / (vol * Math.sqrt(H));
+    return Math.max(this.entryTilt.floor ?? 0.25, Math.min(1, z));
+  }
+
+  // Piramidación estilo Turtle en LARGOS (candidata pyramid): tranche extra cuando el precio
+  // confirma subiendo stepPct sobre la última entrada/añadido, hasta maxAdds. Respeta el cap de
+  // exposición (no el de nº de posiciones: es la MISMA posición). El P&L agrega amount/invested.
+  tryPyramidAdd(symbol, price, buf, currentPrices) {
+    if (!this.pyramid) return;
+    const pos = this.state.openPositions[symbol];
+    if (!pos || pos.side === 'short') return;
+    const step = this.pyramid.stepPct ?? 0.10;
+    const maxAdds = this.pyramid.maxAdds ?? 2;
+    if ((pos.adds ?? 0) >= maxAdds) return;
+    const anchor = pos.lastAddPrice ?? pos.buyPrice;
+    if (!(price >= anchor * (1 + step))) return;
+    if (!this.canOpenPosition(currentPrices, true)) return;
+    const sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf);
+    const investAmount = this.state.balance * sizeFrac;
+    if (!(investAmount > 0)) return;
+    const fillPrice = price * (1 + this.slippagePct);
+    const buyFee = investAmount * this.feePct;
+    pos.amount += (investAmount - buyFee) / fillPrice;
+    pos.invested += investAmount;
+    pos.adds = (pos.adds ?? 0) + 1;
+    pos.lastAddPrice = price;
+    this.state.balance -= investAmount;
+  }
+
   // Caps de cartera (fix #26): nº máximo de posiciones simultáneas y exposición agregada.
   // En modo long/short, si no hay override, aplican los caps de LONGSHORT (paridad con el live,
   // auditoría 2026-07-03 #5). Exposición SIDE-AWARE: un corto compromete su MARGEN (invested),
   // no el nocional a mercado (antes un rally agregado bloqueaba aperturas de más).
-  canOpenPosition(currentPrices) {
+  canOpenPosition(currentPrices, isAdd = false) {
     const maxPos = this.maxConcurrentPositions ?? (this.longShort ? LONGSHORT.maxConcurrentPositions : null);
     const maxExp = this.maxExposurePct ?? (this.longShort ? LONGSHORT.maxExposurePct : null);
     const openCount = Object.keys(this.state.openPositions).length;
-    if (maxPos != null && openCount >= maxPos) return false;
+    if (!isAdd && maxPos != null && openCount >= maxPos) return false;
     if (maxExp != null) {
       const eq = this.currentEquity(currentPrices);
       let invested = 0;
@@ -443,7 +526,7 @@ class BacktestEngine {
   }
 
   executeBuy(symbol, price, time, entryATR = null, buf = null) {
-    const sizeFrac = this.computeSizeFraction(buf);
+    const sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf);
     if (sizeFrac <= 0) return; // vol-targeting devolvió peso 0 (régimen demasiado volátil)
     const investAmount = this.state.balance * sizeFrac;
 
@@ -520,7 +603,7 @@ class BacktestEngine {
   }
 
   executeShortOpen(symbol, price, time, buf = null) {
-    const sizeFrac = this.computeSizeFraction(buf) * (this.shortRiskFraction ?? 1) * this.shortRiskMultiplier(symbol, time);
+    const sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf) * (this.shortRiskFraction ?? 1) * this.shortRiskMultiplier(symbol, time);
     if (sizeFrac <= 0) return;
     const invested = this.state.balance * sizeFrac; // margen reservado
     const amount = invested / price;
