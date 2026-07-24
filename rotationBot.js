@@ -82,9 +82,12 @@ async function _runRotationCycle() {
     topN: ROTATION.topN,
     absMomLookback: ROTATION.absMomLookback,
     useBtcRegime: ROTATION.useBtcRegime,
+    useRiskAdjusted: ROTATION.useRiskAdjusted,
     btcCloses,
     btcSmaPeriod: REGIME.btcSmaPeriod,
+    ...REGIME,
   });
+
   console.log(`🎯 [ROT] ${riskOff ? 'RISK-OFF (BTC<SMA) → cash' : 'targets: ' + (targets.join(', ') || '(ninguno)')}`);
 
   const held = Object.keys(state.openPositions);

@@ -1012,26 +1012,42 @@ export function trailingReturn(closes, lookback) {
 }
 
 /**
- * Filtro maestro de régimen BTC (investigación §2.2): risk-on si el último cierre de BTC
- * está por encima de su SMA(period). Un interruptor global barato y de alto impacto.
+ * Detecta desplomes acelerados en BTC (crash de pánico).
+ * Devuelve true si el retorno de BTC en los últimos `crashGuardLookbackDays` días fue menor a `-crashGuardMaxDropPct`.
  */
-export function btcRegimeOn(btcCloses, smaPeriod = 200) {
+export function btcCrashGuard(btcCloses, opts = {}) {
+  const lookback = opts.crashGuardLookbackDays ?? 3;
+  const maxDropPct = opts.crashGuardMaxDropPct ?? 0.12;
+  if (!btcCloses || btcCloses.length < lookback + 1) return false;
+  const now = btcCloses[btcCloses.length - 1];
+  const prev = btcCloses[btcCloses.length - 1 - lookback];
+  if (!(prev > 0)) return false;
+  const drop = (now - prev) / prev;
+  return drop < -maxDropPct;
+}
+
+/**
+ * Filtro maestro de régimen BTC (investigación §2.2 + mejora 2026-07-24): risk-on si el último cierre de BTC
+ * está por encima de su SMA(period) Y no ha sufrido un desplome de pánico reciente (Crash Guard).
+ */
+export function btcRegimeOn(btcCloses, smaPeriod = 200, opts = {}) {
   if (!btcCloses || btcCloses.length < smaPeriod + 1) return true; // sin datos → no bloquear
+  const crashGuardEnabled = opts.crashGuardEnabled ?? true;
+  if (crashGuardEnabled && btcCrashGuard(btcCloses, opts)) return false;
   const sma = smaLast(btcCloses, smaPeriod);
   return btcCloses[btcCloses.length - 1] > sma;
 }
 
 /**
- * Rotación cross-sectional + dual-momentum (investigación P3+P4). Devuelve el set de símbolos
+ * Rotación cross-sectional + dual-momentum (investigación P3+P4 + mejora 2026-07-24). Devuelve el set de símbolos
  * objetivo a mantener (equiponderados). Pasos:
- *  1) Relativo: rankea por retorno trailing `lookbackDays` y toma top-N.
+ *  1) Relativo: rankea por retorno ajustado a volatilidad (Sharpe de 30d) o retorno bruto.
  *  2) Gate absoluto: solo conserva los que tienen momentum propio > 0 (sobre `absMomLookback`).
- *  3) Gate BTC: si BTC risk-off, devuelve set vacío (todo a cash).
- * El edge robusto viene de los gates (cash en bajista), no del ranking relativo.
+ *  3) Gate BTC: si BTC risk-off (SMA + Crash Guard), devuelve set vacío (todo a cash).
  *
  * @param {Object<string, Array<number>>} closesBySymbol  cierres diarios por símbolo
- * @param {object} opts { lookbackDays, topN, absMomLookback, btcCloses, useBtcRegime, btcSmaPeriod }
- * @returns {{ targets: string[], ranked: Array<{symbol,ret}>, riskOff: boolean }}
+ * @param {object} opts { lookbackDays, topN, absMomLookback, btcCloses, useBtcRegime, btcSmaPeriod, useRiskAdjusted }
+ * @returns {{ targets: string[], ranked: Array<{symbol,ret,score}>, riskOff: boolean }}
  */
 export function computeRotationTargets(closesBySymbol, opts = {}) {
   const lookbackDays = opts.lookbackDays ?? 30;
@@ -1039,18 +1055,37 @@ export function computeRotationTargets(closesBySymbol, opts = {}) {
   const absMomLookback = opts.absMomLookback ?? 30;
   const useBtcRegime = opts.useBtcRegime ?? true;
   const btcSmaPeriod = opts.btcSmaPeriod ?? 200;
+  const useRiskAdjusted = opts.useRiskAdjusted ?? true;
 
-  // Gate maestro BTC
-  if (useBtcRegime && opts.btcCloses && !btcRegimeOn(opts.btcCloses, btcSmaPeriod)) {
+  // Gate maestro BTC (con crash guard)
+  if (useBtcRegime && opts.btcCloses && !btcRegimeOn(opts.btcCloses, btcSmaPeriod, opts)) {
     return { targets: [], ranked: [], riskOff: true };
   }
 
   const ranked = [];
   for (const sym in closesBySymbol) {
-    const ret = trailingReturn(closesBySymbol[sym], lookbackDays);
-    if (ret != null) ranked.push({ symbol: sym, ret });
+    const closes = closesBySymbol[sym];
+    const ret = trailingReturn(closes, lookbackDays);
+    if (ret != null) {
+      let score = ret;
+      if (useRiskAdjusted && closes.length >= lookbackDays + 1) {
+        // Volatilidad realizada de retornos log
+        const rets = [];
+        const slice = closes.slice(closes.length - 1 - lookbackDays);
+        for (let i = 1; i < slice.length; i++) {
+          if (slice[i - 1] > 0 && slice[i] > 0) rets.push(Math.log(slice[i] / slice[i - 1]));
+        }
+        if (rets.length > 5) {
+          const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+          const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / rets.length;
+          const std = Math.sqrt(variance);
+          score = ret / Math.max(std * Math.sqrt(365), 0.05); // retorno ajustado a vol anualizada
+        }
+      }
+      ranked.push({ symbol: sym, ret, score });
+    }
   }
-  ranked.sort((a, b) => b.ret - a.ret);
+  ranked.sort((a, b) => b.score - a.score);
 
   // Top-N relativo + gate de momentum absoluto propio
   const targets = [];

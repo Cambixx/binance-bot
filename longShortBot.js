@@ -1,22 +1,11 @@
 import binance from './binanceService.js';
-import { longShortTrader } from './shadowTrader.js';
+import { longShortTrader, isCircuitBreakerActive } from './shadowTrader.js';
 import telegramService from './telegramService.js';
 import { evaluateStrategySMA200, computeVolTargetWeight, shortEntryAllowed, calculateATR, btcRegimeOn } from './indicators.js';
 import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT, REGIME } from './config.js';
 
 /**
  * CANAL LONG/SHORT — SMA150 "always-in-the-market" (reconvierte el hueco del parado V4C-15m).
- *
- * Misma señal de régimen que el canal SMA150-1d (cierre diario vs SMA150 ± banda), pero en vez de
- * ir a CASH en régimen bajista, abre un CORTO. Flip en el cruce:
- *   - close > SMA150 → LARGO  (cierra el corto si lo había)
- *   - close < SMA150 → CORTO  (cierra el largo si lo había)
- * Idempotente intra-día: solo opera cuando la señal cambia de lado.
- *
- * ⚠️ Honestidad: el lado CORTO no está validado a largo plazo (cripto tiene sesgo alcista). En el
- *    walk-forward de la muestra disponible el long/short batió al long-only (sobre todo en el bear
- *    reciente), pero es ~1 ciclo y perfil trend-following (WR baja, rachas de pérdidas pequeñas).
- *    Se corre en SHADOW para observar; el usuario ejecuta a mano (ya opera corto y largo).
  */
 const DAILY_INTERVAL = '1d';
 
@@ -36,6 +25,11 @@ async function _runCycle() {
   const session = await longShortTrader.beginSession();
   console.log(`📊 [SMA${SMA_PERIOD}-LS] Saldo Virtual: ${session.state.balanceUSDC.toFixed(2)} USDC`);
 
+  const cbActive = isCircuitBreakerActive(session.state);
+  if (cbActive) {
+    console.log(`⛔ [SMA${SMA_PERIOD}-LS] Circuit Breaker activo → pausa temporizada por Max Drawdown rolling (no se abren posiciones nuevas).`);
+  }
+
   const symbols = DAILY_BASKET.filter(s => !isBlacklisted(s));
   const openSymbols = Object.keys(session.state.openPositions);
   const monitored = [...new Set([...symbols, ...openSymbols])];
@@ -51,24 +45,21 @@ async function _runCycle() {
 
   const cooldowns = session.state.cooldowns || (session.state.cooldowns = {});
 
-  // Descarga en paralelo + caché compartida con el canal SMA150-1d (misma cesta/ventana en la
-  // misma invocación del cron → 0 llamadas extra). Ventana SMA_PERIOD+61 = paridad vol-target
-  // con el backtest (ver dailyBot.js).
   const rawBySymbol = {};
   const toFetch = [...new Set([...monitored, ...(REGIME.btcEnabled ? [REGIME.btcSymbol] : [])])];
   await Promise.all(toFetch.map(async (s) => {
     rawBySymbol[s] = await binance.getKlines(s, DAILY_INTERVAL, SMA_PERIOD + 61, {}, { cacheMs: 120000 });
   }));
 
-  // Gate maestro BTC para entradas LARGAS (✅ adoptado 2026-07-10, paridad con el engine).
-  // Solo bloquea ABRIR largos: los flips de cierre y todo el lado corto no se tocan.
+  // Gate maestro BTC para entradas LARGAS (con Crash Guard).
   let btcRiskOn = true;
   if (REGIME.btcEnabled) {
     const btcRaw = rawBySymbol[REGIME.btcSymbol] || [];
     const btcCloses = (btcRaw.length > 0 ? btcRaw.slice(0, -1) : btcRaw).map(k => k.close);
-    btcRiskOn = btcRegimeOn(btcCloses, REGIME.btcSmaPeriod);
-    if (!btcRiskOn) console.log(`⛔ [SMA${SMA_PERIOD}-LS] Gate BTC: BTC < SMA${REGIME.btcSmaPeriod} → no se abren largos nuevos este ciclo.`);
+    btcRiskOn = btcRegimeOn(btcCloses, REGIME.btcSmaPeriod, REGIME);
+    if (!btcRiskOn) console.log(`⛔ [SMA${SMA_PERIOD}-LS] Gate BTC: BTC risk-off (SMA${REGIME.btcSmaPeriod} o Crash Guard) → no se abren largos nuevos este ciclo.`);
   }
+
 
   for (const symbol of monitored) {
     const raw = rawBySymbol[symbol] || [];
@@ -165,6 +156,7 @@ async function _runCycle() {
 // Cap de exposición en LIVE (auditoría #4): porta la guarda que el motor ya aplica, para que el
 // backtest y el live respeten los mismos límites. Valora a coste (sin llamadas extra a la API).
 function canOpenLive(state) {
+  if (isCircuitBreakerActive(state)) return false;
   const open = state.openPositions;
   const count = Object.keys(open).length;
   if (LONGSHORT.maxConcurrentPositions != null && count >= LONGSHORT.maxConcurrentPositions) return false;
@@ -176,3 +168,4 @@ function canOpenLive(state) {
   }
   return true;
 }
+

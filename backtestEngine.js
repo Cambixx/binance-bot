@@ -5,7 +5,7 @@ import {
   evaluateStrategyV5, evaluateStrategyV6,
   evaluateStrategySMA200, evaluateStrategySupertrendDaily, evaluateStrategyDonchian,
   calculateATR, computeVolTargetWeight, computeVolTargetWeightConditional, periodsPerYearFor,
-  shortEntryAllowed, dailyVol
+  shortEntryAllowed, dailyVol, btcRegimeOn
 } from './indicators.js';
 import { evaluateFixedExit } from './exits.js';
 import binance, { cumRateAt } from './binanceService.js';
@@ -461,8 +461,8 @@ class BacktestEngine {
   longEntryAllowed() {
     if (!this.btcGateLong || !this._btcKey || !this._candleBuffers?.[this._btcKey]) return true;
     const c = this._candleBuffers[this._btcKey].closes;
-    const sma = this._smaLast(c, this.btcGateLong.smaPeriod ?? 200);
-    return sma == null ? true : c[c.length - 1] > sma;
+    const smaPeriod = this.btcGateLong.smaPeriod ?? 200;
+    return btcRegimeOn(c, smaPeriod, { ...REGIME, ...this.btcGateLong });
   }
 
   // Multiplicador de fuerza de tendencia al abrir (candidata entryTilt, Carver-lite):

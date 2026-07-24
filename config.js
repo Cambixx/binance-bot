@@ -52,9 +52,10 @@ export const RISK = {
 };
 
 // ─────────────────────────── Banda de histéresis (familia diaria) ───────────────────────────
-// Evita whipsaw en torno a la SMA (auditoría #11): solo entra si close > sma*(1+band)
-// y solo sale a cash si close < sma*(1-band). 0 = sin banda (comportamiento histórico).
-export const SMA_HYSTERESIS_BAND = 0.0;
+// Evita whipsaw en torno a la SMA (auditoría #11 / mejora 2026-07-24): solo entra si close > sma*(1+band)
+// y solo sale a cash si close < sma*(1-band). 0.0075 = 0.75% de histéresis.
+export const SMA_HYSTERESIS_BAND = 0.0075;
+
 
 // ─────────────────────────── Costes de transacción ───────────────────────────
 // Modelo realista: comisión taker de Binance + slippage estimado, aplicados por LADO.
@@ -126,6 +127,9 @@ export const REGIME = {
   btcEnabled: true,        // gate maestro BTC para entradas LARGAS (live + backtest)
   btcSymbol: 'BTCUSDC',
   btcSmaPeriod: 200,       // SMA diaria de BTC para el switch (meseta 200-250; no optimizar fino)
+  crashGuardEnabled: true, // corte rápido si BTC sufre caída de pánico (< -12% en 3 días)
+  crashGuardLookbackDays: 3,
+  crashGuardMaxDropPct: 0.12,
 };
 
 // ─────────────────────────── Rotación cross-sectional + dual-momentum ───────────────────────────
@@ -138,6 +142,15 @@ export const ROTATION = {
   absMomLookback: 30,      // gate de momentum absoluto propio (>0)
   rebalanceDays: 14,       // cadencia bi-semanal (no semanal agresivo)
   useBtcRegime: true,      // exigir BTC risk-on para mantener cualquier posición
+  useRiskAdjusted: true,   // ranking por retorno/volatilidad 30d (Sharpe-ratio) en vez de retorno bruto
+};
+
+// ─────────────────────────── Circuit Breaker de Cartera ───────────────────────────
+// Pausa la apertura de nuevas posiciones si el Max Drawdown de la cartera supera el 12%.
+export const PORTFOLIO_CIRCUIT_BREAKER = {
+  enabled: true,
+  maxDrawdownPct: 12.0,    // 12% MaxDD rolling
+  pauseHours: 48,          // 48 horas de pausa tras el corte
 };
 
 // ─────────────────────────── Capital ───────────────────────────

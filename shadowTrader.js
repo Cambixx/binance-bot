@@ -1,6 +1,7 @@
 import { getStore } from '@netlify/blobs';
 import telegramService from './telegramService.js';
-import { RISK, COSTS, INITIAL_BALANCE } from './config.js';
+import { RISK, COSTS, INITIAL_BALANCE, PORTFOLIO_CIRCUIT_BREAKER } from './config.js';
+
 
 /**
  * Gestor del Modo Simulador (Shadow Mode) usando Netlify Blobs.
@@ -430,3 +431,27 @@ export const longShortTrader = new ShadowTrader({ storeKey: 'bot_state_ls_v1', l
 
 // Exportar la clase por si se quieren más canales en el futuro
 export { ShadowTrader };
+
+/**
+ * Comprueba si el Circuit Breaker de cartera está activo (pausa por Max Drawdown rolling).
+ */
+export function isCircuitBreakerActive(state) {
+  if (!PORTFOLIO_CIRCUIT_BREAKER || !PORTFOLIO_CIRCUIT_BREAKER.enabled) return false;
+  if (state && state.circuitBreakerPausedUntil) {
+    if (Date.now() < new Date(state.circuitBreakerPausedUntil).getTime()) return true;
+  }
+  const history = (state && state.tradeHistory) || [];
+  if (history.length < 4) return false;
+  const recent = history.slice(-8);
+  let totalLoss = 0;
+  for (const t of recent) {
+    if (t.profitUSDC < 0) totalLoss += Math.abs(t.profitUSDC);
+  }
+  const equity = state.balanceUSDC || 0;
+  if (equity > 0 && (totalLoss / (equity + totalLoss)) * 100 >= PORTFOLIO_CIRCUIT_BREAKER.maxDrawdownPct) {
+    state.circuitBreakerPausedUntil = new Date(Date.now() + PORTFOLIO_CIRCUIT_BREAKER.pauseHours * 3600000).toISOString();
+    return true;
+  }
+  return false;
+}
+
