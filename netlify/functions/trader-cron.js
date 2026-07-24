@@ -1,6 +1,7 @@
 import { runDailyBot } from '../../dailyBot.js';
 import { runLongShortBot } from '../../longShortBot.js';
 import { runRotationBot } from '../../rotationBot.js';
+import { maybeSendHeartbeat } from '../../heartbeat.js';
 
 /**
  * Netlify Scheduled Function (Netlify Functions v2). Se ejecuta cada 15 minutos.
@@ -15,6 +16,12 @@ import { runRotationBot } from '../../rotationBot.js';
  *    pero ya NO se ejecuta. Su blob `bot_state_v2` queda congelado.
  *
  * Cada runX tiene su propio try/catch con alerta a Telegram, así un fallo en un canal no tumba a otro.
+ *
+ * 💓 Heartbeat (auditoría 2026-07-24): las notificaciones de Telegram solo salen en trades
+ *    (open/close). En un régimen bajista sostenido eso puede ser semanas de silencio total,
+ *    indistinguible de un cron caído. `maybeSendHeartbeat()` manda un resumen best-effort
+ *    máx. 1×/24h con el estado de cada canal y el gate BTC, para que el silencio se lea como
+ *    "sin cambio de régimen" y no como fallo. Ver `heartbeat.js`.
  */
 export default async (req) => {
   console.log('⏰ Invocando trader-cron (Ejecución programada)');
@@ -27,6 +34,10 @@ export default async (req) => {
   if (process.env.ROTATION_ENABLED === 'true') {
     await runRotationBot();   // Rotación (experimental) — opt-in
   }
+
+  // Heartbeat (auditoría 2026-07-24): resumen a Telegram como mucho 1×/24h, aunque no haya
+  // trades, para que un régimen bajista sostenido no se confunda con un cron caído.
+  await maybeSendHeartbeat();
 };
 
 export const config = {

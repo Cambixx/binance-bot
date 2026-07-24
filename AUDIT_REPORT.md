@@ -374,3 +374,52 @@ resumen (sesgo mecánico a favor); la comparación fold-a-fold económica sigue 
 histórico/BTC). Live: `dailyBot.js` y `longShortBot.js` calculan `btcRegimeOn` con las velas de
 BTC ya descargadas y bloquean solo APERTURAS de largos. Tests nuevos en `test/roi-research.test.js`
 (54/54 en verde). PYR/TILT quedan como opciones del motor para re-tests futuros.
+
+---
+
+## 12. Auditoría LIVE 2026-07-24 (silencio prolongado → causa raíz + observabilidad)
+
+El usuario reportó "semanas sin una señal". Auditoría de **estado real en producción** (no solo
+código): logs del cron en vivo (`netlify logs --source functions`), los 3 blobs de estado
+(`bot_state_daily_v1`, `bot_state_ls_v1`, `bot_state_rotation_v1`) descargados con `netlify
+blobs:get`, y velas diarias reales de la API pública de Binance (independientes del bot) para
+verificar la matemática de régimen sin fiarse solo de releer el código.
+
+### Veredicto: no hay bug en el cron — es un bear market real y severo
+- El cron corre cada ~15 min **sin un solo error** en la ventana observada.
+- BTC: cierre 65,058 USDC vs SMA150=69,835 y SMA200=72,571 (ambas por debajo). **Drawdown de
+  −47.8% desde el ATH** (124,750, 2025-10-06). BTC no cierra por encima de su SMA200 desde el
+  **2025-11-02** (~9 meses).
+- Los 8 símbolos de `DAILY_BASKET` (BTC/ETH/SOL/XRP/LINK/AVAX/DOT/LTC) están **todos** por debajo
+  de su propia SMA150 hoy → no hay nada elegible para largo en ningún canal.
+- `bot_state_daily_v1` (long-only) y `bot_state_rotation_v1`: 0 operaciones, 100% cash — es
+  exactamente el comportamiento DISEÑADO (preservación de capital), no una falla.
+- `bot_state_ls_v1` (long/short): sí está activo — 7 cortos abiertos, reabrió ETH/LINK el
+  2026-07-22 (stop ATR-trailing → re-short el mismo día). El canal SILENCIOSO percibido por el
+  usuario es en realidad el canal que decidió apagarse hace más tiempo: **V4C-15m, parado a
+  propósito el 2026-06-21** (§6) — 5 semanas antes de este reporte, coincide con la queja.
+- Causa de la "sensación" de silencio: `shadowTrader.commitSession` solo manda Telegram si hay
+  un trade (`shadowTrader.js` L95-101). Sin cruce de régimen no hay mensaje, aunque el bot esté
+  vivo y evaluando cada 15 min — indistinguible de un cron caído desde Telegram.
+
+### Anomalía encontrada (sin cerrar): DOTUSDC nunca se ha shorteado en SMA150-LS
+Los otros 7 símbolos de la cesta abrieron corto el 2026-07-03 (giro bajista generalizado); DOT
+no, ni entonces ni después, pese a que replicar `evaluateStrategySMA200`/`shortEntryAllowed`/
+`computeVolTargetWeight` contra velas reales de DOT muestra **todas las condiciones cumplidas
+hoy** (señal SELL, `confirmDays=3` satisfecho, tamaño 20%). No se pudo reproducir la causa exacta
+sin logs históricos del día del giro (retención de `netlify logs` insuficiente). En vez de
+"arreglarlo" a ciegas, se añadió el logging de diagnóstico de abajo — si el gate real sigue
+bloqueando a DOT, el próximo ciclo (≤15 min) lo dirá con una línea explícita.
+
+### Mejoras aplicadas
+| Cambio | Detalle |
+|---|---|
+| **Logging de diagnóstico por-símbolo** en `longShortBot.js` | Antes, si una entrada elegible (señal BUY/SELL, en cesta, sin posición) no se abría, no quedaba rastro de por qué. Ahora cada gate (`btcRiskOn`, cooldown, `entryOk`/confirmDays, `frac<=0` de vol-target, `canOpenLive`/cap de exposición) deja una línea propia. Mismo orden de condiciones que antes → **sin cambio de comportamiento**, solo de observabilidad. |
+| **`botStatus.js` (nuevo)** | `activeChannels()` + `channelStatusBlock()` extraídos de `telegram-webhook.js` (estaban duplicados de facto en cuanto se necesitó la misma lista en un segundo sitio). Fuente única de qué canales están activos y cómo se resumen; `/status` del webhook ahora lo importa en vez de tener su propia copia. |
+| **`heartbeat.js` (nuevo)** | `maybeSendHeartbeat()`, enganchado al final de `trader-cron.js`. Manda un resumen a Telegram (equity/posiciones/trades por canal + estado del gate BTC) **máx. 1×/24h** (throttle vía blob `heartbeat_meta` en el store `shadow_trading_state`), para que un régimen sin cambios no se lea como bot caído. Best-effort: cualquier fallo (Blobs/Telegram/Binance) se traga con `console.error` y NUNCA aborta el ciclo de trading — se ejecuta último, después de los 3 `runX`. |
+
+### Riesgo sobre el estado LIVE
+Cero cambios en la lógica de entrada/salida ni en el formato de los blobs; `npm test` sigue en
+54/54. El heartbeat es una llamada de solo-lectura (`getStats`/`getOpenPositions`) más una
+escritura de 1 campo (`lastSentAt`) en una key nueva — no toca `openPositions`/`tradeHistory` de
+ningún canal.

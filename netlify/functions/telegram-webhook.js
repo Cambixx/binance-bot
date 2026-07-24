@@ -1,6 +1,6 @@
-import { dailyTrader, rotationTrader, longShortTrader } from '../../shadowTrader.js';
 import telegramService, { BOT_COMMANDS } from '../../telegramService.js';
 import binance from '../../binanceService.js';
+import { activeChannels, channelStatusBlock } from '../../botStatus.js';
 
 export default async (req) => {
   if (req.method !== 'POST') {
@@ -40,28 +40,14 @@ export default async (req) => {
       return new Response('OK', { status: 200 });
     }
 
-    // Canales ACTIVOS (según flags). Cada uno con su etiqueta.
-    const channels = [{ trader: dailyTrader, title: '📅 SMA150-1d (long-only)' }];
-    if (process.env.LONGSHORT_ENABLED !== 'false') channels.push({ trader: longShortTrader, title: '↕️ SMA150-LS (long/short)' });
-    if (process.env.ROTATION_ENABLED === 'true') channels.push({ trader: rotationTrader, title: '🔄 ROT-dual-mom (experimental)' });
+    // Canales ACTIVOS (según flags). Fuente única en botStatus.js (auditoría 2026-07-24).
+    const channels = activeChannels();
     const esc = (t) => telegramService.escape(t);
     const tag = (sym) => esc(sym.replace('USDC', ''));
 
     if (text === '/status' || text === '/status-bot') {
-      const channelBlock = async ({ trader, title }) => {
-        const openSymbols = await trader.getOpenPositions();
-        const prices = openSymbols.length > 0 ? await binance.getPrices(openSymbols) : {};
-        const s = await trader.getStats(prices);
-        const icon = parseFloat(s.totalProfitUSDC) >= 0 ? '🟢' : '🔴';
-        const mktNote = s.pricedAtMarket ? '' : ' <i>(a coste)</i>';
-        return `<b>━━ ${esc(title)} ━━</b>\n` +
-          `Equity: ${s.currentTotalEquity} USDC${mktNote} (inicial ${s.initialBalance})\n` +
-          `Disponible: ${s.availableBalance} | Invertido: ${s.investedEquity}\n` +
-          `Posiciones: ${s.openPositionsCount} | Trades: ${s.totalTrades} | WR: ${s.winRate}\n` +
-          `P&L: realizado ${s.realizedPnLUSDC} + latente ${s.unrealizedPnLUSDC} = ${icon} <b>${s.totalProfitUSDC} USDC</b>`;
-      };
       const blocks = [];
-      for (const ch of channels) blocks.push(await channelBlock(ch));
+      for (const ch of channels) blocks.push(await channelStatusBlock(ch));
       await telegramService.sendMessage(`🤖 <b>ESTADO DEL BOT (Shadow Mode)</b>\n\n${blocks.join('\n\n')}`);
     }
 

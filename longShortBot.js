@@ -117,9 +117,20 @@ async function _runCycle() {
         console.log(`🟢 [SMA${SMA_PERIOD}-LS] FLIP a LARGO: cubrir corto ${symbol} a ${price}`);
         longShortTrader.applySell(session, symbol, price, 'SIGNAL');
       }
-      if (inBasket && btcRiskOn && !session.state.openPositions[symbol] && frac > 0 && canOpenLive(session.state)) {
-        console.log(`🟢 [SMA${SMA_PERIOD}-LS] LARGO ${symbol} a ${price} (size ${(frac * 100).toFixed(0)}%)`);
-        longShortTrader.applyBuy(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
+      // Diagnóstico (auditoría 2026-07-24): antes, si una entrada elegible no se abría, no
+      // quedaba rastro de POR QUÉ (silencio indistinguible de "todo va bien"). Cada gate ahora
+      // deja una línea explícita en logs para poder auditar sin reconstruir el estado a mano.
+      if (inBasket && !session.state.openPositions[symbol]) {
+        if (!btcRiskOn) {
+          // Ya logueado una vez por ciclo a nivel de gate global (evita repetirlo por símbolo).
+        } else if (frac <= 0) {
+          console.log(`⚪ [SMA${SMA_PERIOD}-LS] ${symbol} señal LARGO pero vol-target → peso 0 (no se abre)`);
+        } else if (!canOpenLive(session.state)) {
+          console.log(`🚫 [SMA${SMA_PERIOD}-LS] ${symbol} señal LARGO bloqueada por cap de exposición/posiciones (maxExposurePct/maxConcurrentPositions)`);
+        } else {
+          console.log(`🟢 [SMA${SMA_PERIOD}-LS] LARGO ${symbol} a ${price} (size ${(frac * 100).toFixed(0)}%)`);
+          longShortTrader.applyBuy(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
+        }
       }
     } else if (signal === 'SELL') {
       if (pos && pos.side === 'long') {
@@ -130,11 +141,19 @@ async function _runCycle() {
       const shortFrac = frac * (LONGSHORT.shortRiskFraction ?? 1);
       // Filtro de entrada del corto (research #8, ADOPTADO confirm3d): paridad con el motor.
       const entryOk = shortEntryAllowed(closes, { ...LONGSHORT.shortEntry, smaPeriod: SMA_PERIOD });
-      if (inBasket && !onCooldown && entryOk && !session.state.openPositions[symbol] && shortFrac > 0 && canOpenLive(session.state)) {
-        console.log(`🟠 [SMA${SMA_PERIOD}-LS] CORTO ${symbol} a ${price} (size ${(shortFrac * 100).toFixed(0)}%)`);
-        longShortTrader.applyShort(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: shortFrac });
-      } else if (onCooldown && signal === 'SELL') {
-        console.log(`⏳ [SMA${SMA_PERIOD}-LS] ${symbol} en cooldown post-stop (no re-shortear)`);
+      if (inBasket && !session.state.openPositions[symbol]) {
+        if (onCooldown) {
+          console.log(`⏳ [SMA${SMA_PERIOD}-LS] ${symbol} en cooldown post-stop (no re-shortear)`);
+        } else if (!entryOk) {
+          console.log(`🔒 [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO pero filtro de entrada (confirmDays) aún no confirma → no se abre`);
+        } else if (shortFrac <= 0) {
+          console.log(`⚪ [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO pero vol-target → peso 0 (no se abre)`);
+        } else if (!canOpenLive(session.state)) {
+          console.log(`🚫 [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO bloqueada por cap de exposición/posiciones (maxExposurePct/maxConcurrentPositions)`);
+        } else {
+          console.log(`🟠 [SMA${SMA_PERIOD}-LS] CORTO ${symbol} a ${price} (size ${(shortFrac * 100).toFixed(0)}%)`);
+          longShortTrader.applyShort(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: shortFrac });
+        }
       }
     }
   }
