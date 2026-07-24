@@ -239,7 +239,7 @@ class ShadowTrader {
     const tag = telegramService.escape(symbol.replace('USDC', ''));
 
     const nivelesBlock = options.regimeMode
-      ? `📊 <b>Gestión:</b> mantener mientras cierre diario > SMA${options.smaPeriod || 200}; salir a cash si cae por debajo (sin TP/SL fijo).\n\n`
+      ? `📊 <b>Gestión:</b> mantener mientras cierre diario &gt; SMA${options.smaPeriod || 200}; salir a cash si cae por debajo (sin TP/SL fijo).\n\n`
       : `📊 <b>Niveles:</b>\n` +
         `🎯 TP: ${tpPrice.toFixed(4)} (+${tpPct.toFixed(1)}%)\n` +
         `🛑 SL: ${slPrice.toFixed(4)} (-${slPct.toFixed(1)}%) · riesgo ≈ ${riskUSDC.toFixed(2)} USDC\n` +
@@ -291,7 +291,7 @@ class ShadowTrader {
       `<b>Moneda:</b> #${tag}\n` +
       `<b>Precio Entrada (short):</b> ${price.toFixed(4)} USDC\n` +
       `<b>Tamaño sugerido:</b> ${marginUSDC.toFixed(2)} USDC (${(sizeFraction * 100).toFixed(0)}% del saldo)\n\n` +
-      `📊 <b>Gestión:</b> mantener el corto mientras el cierre diario < SMA${options.smaPeriod || 150}; cubrir/cerrar y pasar a largo si lo supera (sin TP/SL fijo).\n\n` +
+      `📊 <b>Gestión:</b> mantener el corto mientras el cierre diario &lt; SMA${options.smaPeriod || 150}; cubrir/cerrar y pasar a largo si lo supera (sin TP/SL fijo).\n\n` +
       `<i>Señal probabilística (lado corto NO validado a largo plazo). Neto de ~0.30% de costes.</i>`
     );
     console.log(`🟠 [${this.label}] SHORT ${symbol} a ${price} USDC (size ${(sizeFraction * 100).toFixed(0)}%)`);

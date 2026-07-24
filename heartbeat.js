@@ -31,7 +31,7 @@ export async function maybeSendHeartbeat() {
       const raw = await binance.getKlines(REGIME.btcSymbol, '1d', REGIME.btcSmaPeriod + 5, {}, { cacheMs: 300000 });
       const closes = (raw.length > 0 ? raw.slice(0, -1) : raw).map(k => k.close);
       const riskOn = btcRegimeOn(closes, REGIME.btcSmaPeriod);
-      regimeLine = `\n\n📡 <b>Régimen BTC:</b> ${riskOn ? `🟢 risk-on (BTC > SMA${REGIME.btcSmaPeriod})` : `🔴 risk-off (BTC < SMA${REGIME.btcSmaPeriod}) → sin largos nuevos`}`;
+      regimeLine = `\n\n📡 <b>Régimen BTC:</b> ${riskOn ? `🟢 risk-on (BTC &gt; SMA${REGIME.btcSmaPeriod})` : `🔴 risk-off (BTC &lt; SMA${REGIME.btcSmaPeriod}) → sin largos nuevos`}`;
     } catch (_) { /* best-effort: el heartbeat no debe fallar por esto */ }
 
     await telegramService.sendMessage(
