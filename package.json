@@ -9,8 +9,8 @@
     "walkforward": "node walkforward.js",
     "validate": "node validate.js",
     "setup-telegram": "node setup-telegram.js",
-    "sync": "npx netlify blobs:get shadow_trading_state bot_state_v2 --output shadow_trades_sync.json",
-    "reset": "npx netlify blobs:delete shadow_trading_state bot_state_v2 ; npx netlify blobs:delete shadow_trading_state bot_state_daily_v1 ; npx netlify blobs:delete shadow_trading_state bot_state_ls_v1 ; npx netlify blobs:delete shadow_trading_state bot_state_rotation_v1",
+    "sync": "npx netlify blobs:get shadow_trading_state bot_state_daily_v1 --output sync_daily.json && npx netlify blobs:get shadow_trading_state bot_state_ls_v1 --output sync_ls.json && npx netlify blobs:get shadow_trading_state bot_state_rotation_v1 --output sync_rotation.json && npx netlify blobs:get shadow_trading_state heartbeat_meta --output sync_heartbeat.json",
+    "reset": "npx netlify blobs:delete shadow_trading_state bot_state_daily_v1 ; npx netlify blobs:delete shadow_trading_state bot_state_ls_v1 ; npx netlify blobs:delete shadow_trading_state bot_state_rotation_v1 ; npx netlify blobs:delete shadow_trading_state heartbeat_meta",
     "clear-blobs": "npm run reset",
     "backtest": "node backtest.js",
     "shadow-report": "node shadow-report.js"

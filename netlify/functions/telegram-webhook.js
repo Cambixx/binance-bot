@@ -51,6 +51,61 @@ export default async (req) => {
       await telegramService.sendMessage(`🤖 <b>ESTADO DEL BOT (Shadow Mode)</b>\n\n${blocks.join('\n\n')}`);
     }
 
+    else if (text === '/portfolio' || text === '/rendimiento' || text === '/cartera') {
+      let totalInit = 0;
+      let totalAvail = 0;
+      let totalInvested = 0;
+      let totalRealized = 0;
+      let totalUnrealized = 0;
+      let totalEquity = 0;
+      let totalOpen = 0;
+      let totalTrades = 0;
+      const chSummaries = [];
+
+      for (const { trader, title } of channels) {
+        const openSyms = await trader.getOpenPositions();
+        const prices = openSyms.length > 0 ? await binance.getPrices(openSyms) : {};
+        const s = await trader.getStats(prices);
+        const init = parseFloat(s.initialBalance) || 5000;
+        const eq = parseFloat(s.currentTotalEquity) || 0;
+        const real = parseFloat(s.realizedPnLUSDC) || 0;
+        const unreal = parseFloat(s.unrealizedPnLUSDC) || 0;
+        const avail = parseFloat(s.availableBalance) || 0;
+        const inv = parseFloat(s.investedEquity) || 0;
+        const chProfit = parseFloat(s.totalProfitUSDC) || 0;
+        const chRoi = init > 0 ? ((chProfit / init) * 100).toFixed(2) : '0.00';
+
+        totalInit += init;
+        totalAvail += avail;
+        totalInvested += inv;
+        totalRealized += real;
+        totalUnrealized += unreal;
+        totalEquity += eq;
+        totalOpen += s.openPositionsCount || 0;
+        totalTrades += s.totalTrades || 0;
+
+        const icon = chProfit >= 0 ? '🟢' : '🔴';
+        chSummaries.push(`• <b>${esc(title)}</b>\n  Equity: ${eq.toFixed(2)} USDC | ${icon} <b>${chProfit >= 0 ? '+' : ''}${chProfit.toFixed(2)} USDC</b> (${chRoi >= 0 ? '+' : ''}${chRoi}%)`);
+      }
+
+      const netProfit = totalEquity - totalInit;
+      const netRoi = totalInit > 0 ? ((netProfit / totalInit) * 100).toFixed(2) : '0.00';
+      const mainIcon = netProfit >= 0 ? '🟢' : '🔴';
+
+      const msg = `🌐 <b>RESUMEN CONSOLIDADO DE CARTERA</b>\n\n` +
+        `💼 <b>Equity Total:</b> ${totalEquity.toFixed(2)} USDC (Inicial: ${totalInit.toFixed(2)} USDC)\n` +
+        `📈 <b>Beneficio Neto:</b> ${mainIcon} <b>${netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)} USDC (${netRoi >= 0 ? '+' : ''}${netRoi}%)</b>\n\n` +
+        `💵 <b>Efectivo Disponible:</b> ${totalAvail.toFixed(2)} USDC\n` +
+        `📊 <b>Capital Invertido:</b> ${totalInvested.toFixed(2)} USDC\n` +
+        `📍 <b>P&L Latente:</b> ${totalUnrealized >= 0 ? '+' : ''}${totalUnrealized.toFixed(2)} USDC\n` +
+        `🧾 <b>P&L Realizado:</b> ${totalRealized >= 0 ? '+' : ''}${totalRealized.toFixed(2)} USDC\n` +
+        `🔓 <b>Posiciones Abiertas:</b> ${totalOpen} | <b>Trades:</b> ${totalTrades}\n\n` +
+        `<b>━━ Desglose por Canal ━━</b>\n` +
+        chSummaries.join('\n\n');
+
+      await telegramService.sendMessage(msg);
+    }
+
     else if (text === '/posiciones' || text === '/positions') {
       const blocks = [];
       for (const { trader, title } of channels) {

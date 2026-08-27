@@ -3,52 +3,66 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Binance Bot - Shadow Report</title>
+    <title>Binance Bot - Multi-Channel Shadow Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0a0e14;
-            --card-bg: rgba(30, 35, 42, 0.8);
-            --card-border: rgba(255, 255, 255, 0.06);
+            --bg-color: #0b0e14;
+            --card-bg: rgba(23, 27, 34, 0.85);
+            --card-border: rgba(255, 255, 255, 0.07);
             --primary: #f0b90b;
-            --primary-glow: rgba(240, 185, 11, 0.15);
+            --primary-glow: rgba(240, 185, 11, 0.18);
             --success: #0ecb81;
             --success-bg: rgba(14, 203, 129, 0.12);
             --danger: #f6465d;
             --danger-bg: rgba(246, 70, 93, 0.12);
             --info: #60a5fa;
             --info-bg: rgba(96, 165, 250, 0.12);
+            --purple: #a855f7;
+            --purple-bg: rgba(168, 85, 247, 0.12);
             --text-main: #eaecef;
-            --text-muted: #6b7280;
-            --border: rgba(255,255,255,0.06);
+            --text-muted: #848e9c;
+            --border: rgba(255, 255, 255, 0.08);
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: 'Inter', -apple-system, sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--bg-color);
             color: var(--text-main);
             line-height: 1.6;
             min-height: 100vh;
+            padding-bottom: 60px;
         }
 
-        .bg-gradient {
+        .bg-glow {
             position: fixed;
-            top: -200px;
-            left: -200px;
+            top: -150px;
+            left: -150px;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(240,185,11,0.06) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .bg-glow-right {
+            position: fixed;
+            top: 20%;
+            right: -150px;
             width: 600px;
             height: 600px;
-            background: radial-gradient(circle, rgba(240,185,11,0.08) 0%, transparent 70%);
+            background: radial-gradient(circle, rgba(14,203,129,0.04) 0%, transparent 70%);
             pointer-events: none;
             z-index: 0;
         }
 
         .container {
-            max-width: 1280px;
+            max-width: 1320px;
             margin: 0 auto;
-            padding: 40px 24px;
+            padding: 36px 24px;
             position: relative;
             z-index: 1;
         }
@@ -56,16 +70,18 @@
         header {
             display: flex;
             justify-content: space-between;
-            align-items: flex-end;
-            margin-bottom: 32px;
+            align-items: center;
+            margin-bottom: 28px;
             flex-wrap: wrap;
-            gap: 12px;
+            gap: 16px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 24px;
         }
 
-        h1 {
-            font-size: 32px;
+        .title-area h1 {
+            font-size: 30px;
             font-weight: 800;
-            background: linear-gradient(135deg, #f0b90b, #f5d060);
+            background: linear-gradient(135deg, #f0b90b, #fcd535);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             letter-spacing: -0.5px;
@@ -73,75 +89,110 @@
 
         .subtitle {
             color: var(--text-muted);
-            font-size: 14px;
-            font-weight: 500;
+            font-size: 13.5px;
+            margin-top: 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
 
-        .strategy-badge {
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success);
+            border-radius: 50%;
             display: inline-block;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 700;
-            background: var(--primary-glow);
-            color: var(--primary);
-            border: 1px solid rgba(240,185,11,0.2);
-            letter-spacing: 0.5px;
+            box-shadow: 0 0 8px var(--success);
+            animation: pulse 2s infinite;
         }
 
-        .info-note {
-            margin-bottom: 24px;
-            padding: 14px 18px;
+        @keyframes pulse {
+            0% { transform: scale(0.95); opacity: 0.8; }
+            50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 12px var(--success); }
+            100% { transform: scale(0.95); opacity: 0.8; }
+        }
+
+        /* TABS NAVIGATION */
+        .tabs-container {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 28px;
+            flex-wrap: wrap;
+            background: rgba(18, 22, 28, 0.9);
+            padding: 6px;
             border-radius: 14px;
-            background: rgba(17, 24, 39, 0.75);
-            border: 1px solid var(--card-border);
-            color: var(--text-muted);
-            font-size: 13px;
+            border: 1px solid var(--border);
         }
 
+        .tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 10px 20px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tab-btn:hover {
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .tab-btn.active {
+            color: #11141a;
+            background: var(--primary);
+            box-shadow: 0 2px 10px rgba(240, 185, 11, 0.35);
+        }
+
+        .tab-pill {
+            font-size: 11px;
+            padding: 2px 7px;
+            border-radius: 20px;
+            background: rgba(0,0,0,0.15);
+            font-weight: 700;
+        }
+
+        /* KPIS GRID */
         .kpi-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 16px;
-            margin-bottom: 40px;
+            margin-bottom: 28px;
         }
 
         .kpi-card {
             background: var(--card-bg);
-            backdrop-filter: blur(20px);
-            padding: 24px;
-            border-radius: 16px;
             border: 1px solid var(--card-border);
-            transition: all 0.3s ease;
+            padding: 20px;
+            border-radius: 16px;
+            backdrop-filter: blur(12px);
+            position: relative;
+            overflow: hidden;
+            transition: transform 0.2s ease, border-color 0.2s ease;
         }
 
         .kpi-card:hover {
-            transform: translateY(-4px);
-            border-color: rgba(240,185,11,0.2);
-            box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+            transform: translateY(-2px);
+            border-color: rgba(240, 185, 11, 0.25);
         }
 
-        .kpi-card.highlight {
-            border: 1px solid rgba(240, 185, 11, 0.4);
-            background: linear-gradient(135deg, rgba(30, 35, 42, 0.9) 0%, rgba(240, 185, 11, 0.05) 100%);
-        }
-
-        .kpi-card.highlight .kpi-value {
-            color: var(--primary);
-            font-size: 30px;
-        }
-
-        .kpi-label {
+        .kpi-title {
             color: var(--text-muted);
-            font-size: 11px;
-            font-weight: 700;
+            font-size: 12px;
+            font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 0.5px;
             margin-bottom: 8px;
         }
 
         .kpi-value {
-            font-size: 26px;
+            font-size: 24px;
             font-weight: 800;
             letter-spacing: -0.5px;
         }
@@ -154,528 +205,567 @@
 
         .positive { color: var(--success); }
         .negative { color: var(--danger); }
-        .neutral { color: var(--text-main); }
-        .info { color: var(--info); }
+        .neutral { color: var(--primary); }
 
-        .charts-grid {
+        /* CHARTS SECTION */
+        .chart-grid {
             display: grid;
-            grid-template-columns: 3fr 1fr;
-            gap: 16px;
-            margin-bottom: 24px;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 28px;
         }
 
-        .charts-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 16px;
-            margin-bottom: 24px;
+        @media (max-width: 1024px) {
+            .chart-grid { grid-template-columns: 1fr; }
         }
 
-        .card {
+        .chart-card {
             background: var(--card-bg);
-            backdrop-filter: blur(20px);
-            padding: 28px;
-            border-radius: 16px;
             border: 1px solid var(--card-border);
+            padding: 24px;
+            border-radius: 16px;
+            backdrop-filter: blur(12px);
         }
 
-        .card-title {
-            font-size: 14px;
+        .chart-card h3 {
+            font-size: 16px;
             font-weight: 700;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 20px;
+            margin-bottom: 18px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
 
-        .symbol-table,
-        .trades-table,
-        .positions-table {
+        .chart-box {
+            position: relative;
+            height: 300px;
+            width: 100%;
+        }
+
+        /* TABLES SECTION */
+        .section-title {
+            font-size: 18px;
+            font-weight: 700;
+            margin: 32px 0 16px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .table-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            overflow: hidden;
+            backdrop-filter: blur(12px);
+            margin-bottom: 24px;
+        }
+
+        table {
             width: 100%;
             border-collapse: collapse;
-        }
-
-        .symbol-table th,
-        .trades-table th,
-        .positions-table th {
+            font-size: 13.5px;
             text-align: left;
+        }
+
+        th {
+            background: rgba(15, 18, 24, 0.7);
             color: var(--text-muted);
-            font-size: 11px;
-            font-weight: 700;
+            padding: 14px 18px;
+            font-weight: 600;
             text-transform: uppercase;
+            font-size: 11.5px;
             letter-spacing: 0.5px;
-            padding: 12px 14px;
             border-bottom: 1px solid var(--border);
         }
 
-        .symbol-table td,
-        .trades-table td,
-        .positions-table td {
-            padding: 12px 14px;
-            font-size: 13px;
+        td {
+            padding: 14px 18px;
             border-bottom: 1px solid var(--border);
+            color: var(--text-main);
         }
 
-        .trades-table-container {
-            max-height: 500px;
-            overflow-y: auto;
-            scrollbar-width: thin;
-            scrollbar-color: #2b3139 transparent;
-        }
-
-        .trades-table th {
-            position: sticky;
-            top: 0;
-            background: #1e2329;
-            z-index: 2;
-        }
-
-        .trades-table tr:hover,
-        .positions-table tr:hover,
-        .symbol-table tr:hover {
-            background: rgba(255,255,255,0.02);
+        tbody tr:hover {
+            background: rgba(255, 255, 255, 0.02);
         }
 
         .badge {
             display: inline-block;
-            padding: 4px 10px;
+            padding: 3px 8px;
             border-radius: 6px;
             font-size: 11px;
             font-weight: 700;
-            letter-spacing: 0.3px;
+            text-transform: uppercase;
         }
 
+        .badge-long { background: var(--success-bg); color: var(--success); }
+        .badge-short { background: var(--danger-bg); color: var(--danger); }
         .badge-tp { background: var(--success-bg); color: var(--success); }
         .badge-sl { background: var(--danger-bg); color: var(--danger); }
+        .badge-trail { background: var(--purple-bg); color: var(--purple); }
         .badge-signal { background: var(--info-bg); color: var(--info); }
-        .badge-trail { background: rgba(240, 185, 11, 0.12); color: var(--primary); }
-        .badge-open { background: rgba(16, 185, 129, 0.12); color: #34d399; }
-        .badge-pending { background: rgba(107,114,128,0.15); color: var(--text-muted); }
+        .badge-pending { background: rgba(255,255,255,0.06); color: var(--text-muted); }
 
-        #no-data,
-        .empty-card {
+        .empty-row {
             text-align: center;
-            padding: 120px 40px;
-            font-size: 16px;
+            padding: 32px !important;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        /* CHANNELS COMPARISON CARDS */
+        .channels-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 16px;
+            margin-bottom: 28px;
+        }
+
+        .ch-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 20px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .ch-card:hover {
+            border-color: var(--primary);
+            transform: translateY(-2px);
+        }
+
+        .ch-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .ch-name { font-size: 15px; font-weight: 700; }
+        .ch-stats-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            margin-top: 6px;
             color: var(--text-muted);
         }
-
-        @media (max-width: 768px) {
-            .charts-grid,
-            .charts-row {
-                grid-template-columns: 1fr;
-            }
-
-            .kpi-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
+        .ch-stats-val { font-weight: 600; color: var(--text-main); }
     </style>
 </head>
 <body>
-    <div class="bg-gradient"></div>
+    <div class="bg-glow"></div>
+    <div class="bg-glow-right"></div>
+
     <div class="container">
         <header>
-            <div>
-                <h1>📡 Shadow Trading Report</h1>
-                <div id="period-info" class="subtitle"></div>
+            <div class="title-area">
+                <h1>Binance Bot — Shadow Mode Report</h1>
+                <div class="subtitle">
+                    <span class="pulse-dot"></span>
+                    <span>Auditoría en tiempo real de operaciones y rendimiento multi-canal</span>
+                    <span style="opacity: 0.5">•</span>
+                    <span id="gen-timestamp">Actualizando...</span>
+                </div>
             </div>
-            <div id="strategy-badge"></div>
         </header>
 
-        <div id="info-note" class="info-note" style="display: none;"></div>
+        <!-- TABS -->
+        <div class="tabs-container">
+            <button class="tab-btn active" onclick="switchChannel('portfolio')">
+                🌐 Cartera Global <span class="tab-pill" id="pill-portfolio">0%</span>
+            </button>
+            <button class="tab-btn" onclick="switchChannel('daily')">
+                📅 SMA150 Diario (Long-Only) <span class="tab-pill" id="pill-daily">0%</span>
+            </button>
+            <button class="tab-btn" onclick="switchChannel('rotation')">
+                🔄 Rotación Dual-Mom <span class="tab-pill" id="pill-rotation">0%</span>
+            </button>
+            <button class="tab-btn" onclick="switchChannel('ls')">
+                ↕️ SMA150 Long/Short <span class="tab-pill" id="pill-ls">0%</span>
+            </button>
+        </div>
 
-        <div id="main-content" style="display: none;">
-            <div class="kpi-grid">
-                <div class="kpi-card highlight">
-                    <div class="kpi-label">Equity Actual</div>
-                    <div id="kpi-equity" class="kpi-value">--</div>
-                    <div id="kpi-balance-sub" class="kpi-sub"></div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">ROI Total</div>
-                    <div id="kpi-roi" class="kpi-value">--</div>
-                    <div id="kpi-profit-sub" class="kpi-sub"></div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">P&L Realizado</div>
-                    <div id="kpi-realized" class="kpi-value">--</div>
-                    <div id="kpi-unrealized-sub" class="kpi-sub"></div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Win Rate</div>
-                    <div id="kpi-winrate" class="kpi-value">--</div>
-                    <div id="kpi-wl" class="kpi-sub"></div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Profit Factor</div>
-                    <div id="kpi-pf" class="kpi-value neutral">--</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Max Drawdown</div>
-                    <div id="kpi-drawdown" class="kpi-value negative">--</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Trades Cerrados</div>
-                    <div id="kpi-trades" class="kpi-value neutral">--</div>
-                    <div id="kpi-duration" class="kpi-sub"></div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Posiciones Abiertas</div>
-                    <div id="kpi-open" class="kpi-value info">--</div>
-                    <div id="kpi-open-sub" class="kpi-sub"></div>
-                </div>
+        <!-- CHANNEL OVERVIEW (Visible only on Portfolio tab) -->
+        <div id="channels-overview" class="channels-summary-grid"></div>
+
+        <!-- KPIS -->
+        <div class="kpi-grid">
+            <div class="kpi-card">
+                <div class="kpi-title">Equity Total</div>
+                <div class="kpi-value" id="kpi-equity">0.00 $</div>
+                <div class="kpi-sub" id="kpi-initial">Inicial: 0.00 $</div>
             </div>
+            <div class="kpi-card">
+                <div class="kpi-title">Retorno Neto (ROI)</div>
+                <div class="kpi-value" id="kpi-roi">0.00%</div>
+                <div class="kpi-sub" id="kpi-profit-usdc">0.00 USDC</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-title">P&L Latente (Flotante)</div>
+                <div class="kpi-value" id="kpi-unrealized">0.00 $</div>
+                <div class="kpi-sub" id="kpi-invested">Invertido: 0.00 $</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-title">P&L Realizado</div>
+                <div class="kpi-value" id="kpi-realized">0.00 $</div>
+                <div class="kpi-sub" id="kpi-available">Efectivo: 0.00 $</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-title">Posiciones Abiertas</div>
+                <div class="kpi-value neutral" id="kpi-positions">0</div>
+                <div class="kpi-sub" id="kpi-trades-count">0 cerrados</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-title">Max Drawdown</div>
+                <div class="kpi-value negative" id="kpi-drawdown">0.00%</div>
+                <div class="kpi-sub" id="kpi-winrate">Win Rate: 0.0%</div>
+            </div>
+        </div>
 
-            <div class="charts-grid">
-                <div class="card">
-                    <div class="card-title">Equity Curve Reconstruida</div>
+        <!-- CHARTS -->
+        <div class="chart-grid">
+            <div class="chart-card">
+                <h3>📈 Curva de Equity (Capital Total en Tiempo Real)</h3>
+                <div class="chart-box">
                     <canvas id="equityChart"></canvas>
                 </div>
-                <div class="card">
-                    <div class="card-title">Exposición Actual</div>
-                    <canvas id="exposureChart"></canvas>
-                </div>
             </div>
-
-            <div class="charts-row">
-                <div class="card">
-                    <div class="card-title">Drawdown</div>
+            <div class="chart-card">
+                <h3>🌊 Curva de Drawdown Histórico</h3>
+                <div class="chart-box">
                     <canvas id="drawdownChart"></canvas>
-                </div>
-                <div class="card">
-                    <div class="card-title">Win / Loss</div>
-                    <canvas id="distributionChart"></canvas>
-                </div>
-            </div>
-
-            <div class="card" style="margin-bottom: 24px;">
-                <div class="card-title">Motivo de Cierre</div>
-                <canvas id="reasonChart"></canvas>
-            </div>
-
-            <div class="card" style="margin-bottom: 24px;">
-                <div class="card-title">Posiciones Abiertas</div>
-                <table class="positions-table">
-                    <thead>
-                        <tr>
-                            <th>Símbolo</th>
-                            <th>Apertura</th>
-                            <th>Entrada</th>
-                            <th>Actual</th>
-                            <th>Invertido</th>
-                            <th>Valor Mercado</th>
-                            <th>P&L</th>
-                            <th>Trailing</th>
-                        </tr>
-                    </thead>
-                    <tbody id="positions-tbody"></tbody>
-                </table>
-            </div>
-
-            <div class="card" style="margin-bottom: 24px;">
-                <div class="card-title">Rendimiento por Moneda</div>
-                <table class="symbol-table">
-                    <thead>
-                        <tr>
-                            <th>Símbolo</th>
-                            <th>Trades</th>
-                            <th>Win Rate</th>
-                            <th>P&L Neto</th>
-                        </tr>
-                    </thead>
-                    <tbody id="symbol-tbody"></tbody>
-                </table>
-            </div>
-
-            <div class="card">
-                <div class="card-title">Historial de Operaciones Cerradas</div>
-                <div class="trades-table-container">
-                    <table class="trades-table">
-                        <thead>
-                            <tr>
-                                <th>Símbolo</th>
-                                <th>Entrada</th>
-                                <th>Salida</th>
-                                <th>Precio Compra</th>
-                                <th>Precio Venta</th>
-                                <th>P&L</th>
-                                <th>P&L %</th>
-                                <th>Motivo</th>
-                            </tr>
-                        </thead>
-                        <tbody id="trades-tbody"></tbody>
-                    </table>
                 </div>
             </div>
         </div>
 
-        <div id="no-data">
-            🔍 Cargando resultados...<br>
-            <small>Ejecuta <code>npm run shadow-report</code> primero.</small>
+        <!-- OPEN POSITIONS TABLE -->
+        <div class="section-title">
+            <span>📌 Posiciones Abiertas (Valoración a Mercado)</span>
+        </div>
+        <div class="table-card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Símbolo</th>
+                        <th>Canal</th>
+                        <th>Lado</th>
+                        <th>Fecha Apertura</th>
+                        <th>Precio Entrada</th>
+                        <th>Precio Actual</th>
+                        <th>Coste (USDC)</th>
+                        <th>Valor Mercado</th>
+                        <th>P&L Latente</th>
+                    </tr>
+                </thead>
+                <tbody id="positions-tbody"></tbody>
+            </table>
+        </div>
+
+        <!-- CLOSED TRADES TABLE -->
+        <div class="section-title">
+            <span>🧾 Historial de Operaciones Cerradas</span>
+        </div>
+        <div class="table-card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Símbolo</th>
+                        <th>Canal</th>
+                        <th>Lado</th>
+                        <th>Apertura</th>
+                        <th>Cierre</th>
+                        <th>Entrada</th>
+                        <th>Salida</th>
+                        <th>P&L (USDC)</th>
+                        <th>Retorno %</th>
+                        <th>Motivo Salida</th>
+                    </tr>
+                </thead>
+                <tbody id="trades-tbody"></tbody>
+            </table>
         </div>
     </div>
 
     <script>
-        const chartDefaults = {
-            responsive: true,
-            plugins: { legend: { display: false } },
-            scales: {
-                x: { ticks: { color: '#6b7280', maxTicksLimit: 8, font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
-                y: { ticks: { color: '#6b7280', font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.04)' } }
-            }
-        };
+        let reportData = null;
+        let currentTab = 'portfolio';
+        let equityChart = null;
+        let drawdownChart = null;
 
         async function loadData() {
             if (window.__SHADOW_DATA__) {
-                renderReport(window.__SHADOW_DATA__);
-                return;
-            }
-
-            try {
-                const response = await fetch('shadow-report-results.json');
-                renderReport(await response.json());
-            } catch (error) {
-                document.getElementById('no-data').innerHTML = "❌ No se encontró <code>shadow-report-results.json</code>.<br><small>Ejecuta <code>npm run shadow-report</code>.</small>";
-            }
-        }
-
-        function renderReport(data) {
-            document.getElementById('no-data').style.display = 'none';
-            document.getElementById('main-content').style.display = 'block';
-
-            const s = data.summary;
-            document.getElementById('period-info').innerText = `${fmtDateTime(s.generatedAt)} · ${s.totalTrades} cierres · ${s.openPositionsCount} abiertas`;
-            document.getElementById('strategy-badge').innerHTML = `<span class="strategy-badge">${s.reportType} · ${s.blobKey}</span>`;
-
-            const note = document.getElementById('info-note');
-            note.style.display = 'block';
-            note.innerText = `${s.reconstructionNote} Fuente: ${s.stateSource}`;
-
-            document.getElementById('kpi-equity').innerText = `${s.currentTotalEquity.toFixed(2)} USDC`;
-            document.getElementById('kpi-balance-sub').innerText = `Cash: ${s.availableBalance.toFixed(2)} · Mercado: ${s.currentMarketValue.toFixed(2)}`;
-
-            setKPI('kpi-roi', `${s.roi >= 0 ? '+' : ''}${s.roi}%`, s.roi >= 0);
-            document.getElementById('kpi-profit-sub').innerText = `${s.totalProfit >= 0 ? '+' : ''}${s.totalProfit.toFixed(2)} USDC sobre ${s.initialBalance} iniciales`;
-
-            setKPI('kpi-realized', `${s.realizedProfit >= 0 ? '+' : ''}${s.realizedProfit.toFixed(2)}`, s.realizedProfit >= 0);
-            document.getElementById('kpi-unrealized-sub').innerText = `No realizado: ${s.unrealizedProfit >= 0 ? '+' : ''}${s.unrealizedProfit.toFixed(2)} USDC`;
-
-            setKPI('kpi-winrate', `${s.winRate}%`, s.winRate >= 40);
-            document.getElementById('kpi-wl').innerText = `${s.winningTrades}W / ${s.losingTrades}L`;
-
-            const pfText = s.profitFactor === null && s.winningTrades > 0 ? '∞' : (s.profitFactor ?? 0).toFixed(2);
-            document.getElementById('kpi-pf').innerText = pfText;
-            document.getElementById('kpi-pf').className = `kpi-value ${s.profitFactor === null ? 'positive' : (s.profitFactor >= 1 ? 'positive' : 'negative')}`;
-
-            document.getElementById('kpi-drawdown').innerText = `-${s.maxDrawdown}%`;
-            document.getElementById('kpi-trades').innerText = s.totalTrades;
-            document.getElementById('kpi-duration').innerText = `~${s.avgDurationHours}h por trade`;
-            document.getElementById('kpi-open').innerText = s.openPositionsCount;
-            document.getElementById('kpi-open-sub').innerText = `${s.trailingActiveCount} con trailing activo`;
-
-            new Chart(document.getElementById('equityChart'), {
-                type: 'line',
-                data: {
-                    labels: data.equityCurve.map(point => fmtDate(point.time)),
-                    datasets: [{
-                        data: data.equityCurve.map(point => point.equity),
-                        borderColor: '#f0b90b',
-                        backgroundColor: 'rgba(240,185,11,0.08)',
-                        fill: true,
-                        tension: 0.3,
-                        pointRadius: 0,
-                        borderWidth: 2
-                    }]
-                },
-                options: chartDefaults
-            });
-
-            const exposureLabels = data.openPositions.length
-                ? data.openPositions.map(position => position.symbol.replace('USDC', ''))
-                : ['Sin posiciones'];
-            const exposureValues = data.openPositions.length
-                ? data.openPositions.map(position => position.marketValue)
-                : [1];
-            const exposureColors = data.openPositions.length
-                ? ['#f0b90b', '#0ecb81', '#60a5fa', '#f97316', '#f6465d', '#22c55e', '#a78bfa', '#14b8a6']
-                : ['#374151'];
-
-            new Chart(document.getElementById('exposureChart'), {
-                type: 'doughnut',
-                data: {
-                    labels: exposureLabels,
-                    datasets: [{ data: exposureValues, backgroundColor: exposureColors, borderWidth: 0 }]
-                },
-                options: doughnutOptions()
-            });
-
-            new Chart(document.getElementById('drawdownChart'), {
-                type: 'line',
-                data: {
-                    labels: data.drawdownCurve.map(point => fmtDate(point.time)),
-                    datasets: [{
-                        data: data.drawdownCurve.map(point => -point.drawdown),
-                        borderColor: '#f6465d',
-                        backgroundColor: 'rgba(246,70,93,0.08)',
-                        fill: true,
-                        tension: 0.3,
-                        pointRadius: 0,
-                        borderWidth: 2
-                    }]
-                },
-                options: chartDefaults
-            });
-
-            new Chart(document.getElementById('distributionChart'), {
-                type: 'doughnut',
-                data: {
-                    labels: ['Ganadores', 'Perdedores'],
-                    datasets: [{
-                        data: [s.winningTrades, s.losingTrades || (s.totalTrades === 0 ? 1 : 0)],
-                        backgroundColor: ['#0ecb81', '#f6465d'],
-                        borderWidth: 0
-                    }]
-                },
-                options: doughnutOptions()
-            });
-
-            const reasonKeys = Object.keys(s.byReason || {});
-            const reasonLabels = { TAKE_PROFIT: '🎯 TP', STOP_LOSS: '🛑 SL', SIGNAL: '📶 Signal', TRAILING_STOP: '📈 Trail' };
-            const reasonColors = { TAKE_PROFIT: '#0ecb81', STOP_LOSS: '#f6465d', SIGNAL: '#60a5fa', TRAILING_STOP: '#f0b90b' };
-
-            new Chart(document.getElementById('reasonChart'), {
-                type: 'bar',
-                data: {
-                    labels: reasonKeys.length ? reasonKeys.map(key => reasonLabels[key] || key) : ['Sin cierres'],
-                    datasets: [{
-                        data: reasonKeys.length ? reasonKeys.map(key => s.byReason[key]) : [0],
-                        backgroundColor: reasonKeys.length ? reasonKeys.map(key => reasonColors[key] || '#6b7280') : ['#374151'],
-                        borderRadius: 8
-                    }]
-                },
-                options: {
-                    ...chartDefaults,
-                    plugins: { legend: { display: false } }
+                reportData = window.__SHADOW_DATA__;
+            } else {
+                try {
+                    const res = await fetch('shadow-report-results.json');
+                    reportData = await res.json();
+                } catch (e) {
+                    console.error('No se pudo cargar shadow-report-results.json', e);
+                    return;
                 }
-            });
-
-            renderOpenPositions(data.openPositions);
-            renderBySymbol(s.bySymbol);
-            renderTrades(data.trades);
-        }
-
-        function renderOpenPositions(openPositions) {
-            const tbody = document.getElementById('positions-tbody');
-
-            if (!openPositions.length) {
-                tbody.innerHTML = `<tr><td colspan="8" class="empty-card">No hay posiciones abiertas en el blob actual.</td></tr>`;
-                return;
             }
 
-            openPositions.forEach((position) => {
-                const cls = position.unrealizedProfit >= 0 ? 'positive' : 'negative';
-                const trailText = position.trailingActivated
-                    ? `<span class="badge badge-trail">ON @ ${formatPrice(position.trailingStopPrice)}</span>`
-                    : '<span class="badge badge-pending">OFF</span>';
-
-                tbody.innerHTML += `<tr>
-                    <td style="font-weight: 700">#${position.symbol.replace('USDC', '')}</td>
-                    <td>${fmtDateTime(position.buyTime)}</td>
-                    <td>${formatPrice(position.buyPrice)}</td>
-                    <td>${formatPrice(position.currentPrice)}</td>
-                    <td>${position.investedUSDC.toFixed(2)}</td>
-                    <td>${position.marketValue.toFixed(2)}</td>
-                    <td class="${cls}" style="font-weight: 700">${position.unrealizedProfit >= 0 ? '+' : ''}${position.unrealizedProfit.toFixed(2)} (${position.unrealizedProfitPct >= 0 ? '+' : ''}${position.unrealizedProfitPct.toFixed(2)}%)</td>
-                    <td>${trailText}</td>
-                </tr>`;
-            });
+            document.getElementById('gen-timestamp').innerText = fmtDateTime(reportData.summary.generatedAt);
+            updateTabPills();
+            renderChannelOverviewCards();
+            renderCurrentView();
         }
 
-        function renderBySymbol(bySymbol) {
-            const tbody = document.getElementById('symbol-tbody');
-            const entries = Object.entries(bySymbol || {});
-
-            if (!entries.length) {
-                tbody.innerHTML = `<tr><td colspan="4" class="empty-card">Todavía no hay operaciones cerradas para resumir.</td></tr>`;
-                return;
-            }
-
-            entries
-                .sort((a, b) => b[1].profit - a[1].profit)
-                .forEach(([symbol, stats]) => {
-                    const winRate = stats.trades > 0 ? ((stats.wins / stats.trades) * 100).toFixed(1) : '0.0';
-                    const cls = stats.profit >= 0 ? 'positive' : 'negative';
-                    tbody.innerHTML += `<tr>
-                        <td style="font-weight: 700">${symbol.replace('USDC', '')}</td>
-                        <td>${stats.trades}</td>
-                        <td>${winRate}%</td>
-                        <td class="${cls}" style="font-weight: 700">${stats.profit >= 0 ? '+' : ''}${stats.profit.toFixed(2)}</td>
-                    </tr>`;
-                });
+        function updateTabPills() {
+            const p = reportData.portfolio;
+            const ch = reportData.channels || {};
+            setPill('pill-portfolio', p.roi);
+            if (ch.daily) setPill('pill-daily', ch.daily.roi);
+            if (ch.rotation) setPill('pill-rotation', ch.rotation.roi);
+            if (ch.ls) setPill('pill-ls', ch.ls.roi);
         }
 
-        function renderTrades(trades) {
-            const tbody = document.getElementById('trades-tbody');
-
-            if (!trades.length) {
-                tbody.innerHTML = `<tr><td colspan="8" class="empty-card">No hay cierres registrados en el blob actual.</td></tr>`;
-                return;
-            }
-
-            [...trades].reverse().forEach((trade) => {
-                const cls = trade.profit >= 0 ? 'positive' : 'negative';
-                const badgeCls = trade.reason === 'TAKE_PROFIT' ? 'badge-tp'
-                    : trade.reason === 'STOP_LOSS' ? 'badge-sl'
-                    : trade.reason === 'TRAILING_STOP' ? 'badge-trail'
-                    : 'badge-signal';
-
-                tbody.innerHTML += `<tr>
-                    <td style="font-weight: 600">#${trade.symbol.replace('USDC', '')}</td>
-                    <td>${fmtDateTime(trade.buyTime)}</td>
-                    <td>${fmtDateTime(trade.sellTime)}</td>
-                    <td>${formatPrice(trade.buyPrice)}</td>
-                    <td>${formatPrice(trade.sellPrice)}</td>
-                    <td class="${cls}" style="font-weight: 700">${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)}</td>
-                    <td class="${cls}">${trade.profitPct >= 0 ? '+' : ''}${trade.profitPct.toFixed(2)}%</td>
-                    <td><span class="badge ${badgeCls}">${trade.reason.replace('_', ' ')}</span></td>
-                </tr>`;
-            });
-        }
-
-        function setKPI(id, text, isPositive) {
+        function setPill(id, roi) {
             const el = document.getElementById(id);
-            el.innerText = text;
-            el.className = `kpi-value ${isPositive ? 'positive' : 'negative'}`;
+            if (!el) return;
+            el.innerText = `${roi >= 0 ? '+' : ''}${roi}%`;
+            el.style.background = roi >= 0 ? 'rgba(14, 203, 129, 0.2)' : 'rgba(246, 70, 93, 0.2)';
+            el.style.color = roi >= 0 ? '#0ecb81' : '#f6465d';
         }
 
-        function doughnutOptions() {
-            return {
+        function renderChannelOverviewCards() {
+            const container = document.getElementById('channels-overview');
+            if (currentTab !== 'portfolio') {
+                container.style.display = 'none';
+                return;
+            }
+            container.style.display = 'grid';
+            container.innerHTML = '';
+
+            const ch = reportData.channels || {};
+            Object.values(ch).forEach(c => {
+                const isPos = c.totalProfit >= 0;
+                const card = document.createElement('div');
+                card.className = 'ch-card';
+                card.onclick = () => switchChannel(c.id);
+                card.innerHTML = `
+                    <div class="ch-header">
+                        <span class="ch-name">${c.title}</span>
+                        <span class="badge ${isPos ? 'badge-long' : 'badge-short'}">${isPos ? '+' : ''}${c.roi}%</span>
+                    </div>
+                    <div class="ch-stats-row">
+                        <span>Equity:</span>
+                        <span class="ch-stats-val">${c.currentTotalEquity.toFixed(2)} USDC</span>
+                    </div>
+                    <div class="ch-stats-row">
+                        <span>P&L Total:</span>
+                        <span class="ch-stats-val ${isPos ? 'positive' : 'negative'}">${isPos ? '+' : ''}${c.totalProfit.toFixed(2)} USDC</span>
+                    </div>
+                    <div class="ch-stats-row">
+                        <span>Posiciones / Trades:</span>
+                        <span class="ch-stats-val">${c.openPositions.length} abiertas / ${c.trades.length} cerrados</span>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        function switchChannel(channelId) {
+            currentTab = channelId;
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            const idx = channelId === 'portfolio' ? 0 : channelId === 'daily' ? 1 : channelId === 'rotation' ? 2 : 3;
+            const btns = document.querySelectorAll('.tab-btn');
+            if (btns[idx]) btns[idx].classList.add('active');
+
+            renderChannelOverviewCards();
+            renderCurrentView();
+        }
+
+        function getCurrentData() {
+            if (currentTab === 'portfolio') return reportData.portfolio;
+            return reportData.channels[currentTab] || reportData.portfolio;
+        }
+
+        function renderCurrentView() {
+            const data = getCurrentData();
+
+            // KPIs
+            document.getElementById('kpi-equity').innerText = `${data.currentTotalEquity.toFixed(2)} $`;
+            document.getElementById('kpi-initial').innerText = `Inicial: ${data.initialBalance.toFixed(2)} $`;
+
+            const isRoiPos = data.roi >= 0;
+            const kpiRoi = document.getElementById('kpi-roi');
+            kpiRoi.innerText = `${isRoiPos ? '+' : ''}${data.roi.toFixed(2)}%`;
+            kpiRoi.className = `kpi-value ${isRoiPos ? 'positive' : 'negative'}`;
+            document.getElementById('kpi-profit-usdc').innerText = `${data.totalProfit >= 0 ? '+' : ''}${data.totalProfit.toFixed(2)} USDC`;
+
+            const isUnrPos = data.unrealizedProfit >= 0;
+            const kpiUnr = document.getElementById('kpi-unrealized');
+            kpiUnr.innerText = `${isUnrPos ? '+' : ''}${data.unrealizedProfit.toFixed(2)} $`;
+            kpiUnr.className = `kpi-value ${isUnrPos ? 'positive' : 'negative'}`;
+            document.getElementById('kpi-invested').innerText = `Invertido: ${data.investedCost.toFixed(2)} $`;
+
+            const isRealPos = data.realizedProfit >= 0;
+            const kpiReal = document.getElementById('kpi-realized');
+            kpiReal.innerText = `${isRealPos ? '+' : ''}${data.realizedProfit.toFixed(2)} $`;
+            kpiReal.className = `kpi-value ${isRealPos ? 'positive' : 'negative'}`;
+            document.getElementById('kpi-available').innerText = `Efectivo: ${data.availableBalance.toFixed(2)} $`;
+
+            document.getElementById('kpi-positions').innerText = data.openPositions.length;
+            document.getElementById('kpi-trades-count').innerText = `${data.tradeStats?.totalTrades || data.trades.length} cerrados`;
+
+            document.getElementById('kpi-drawdown').innerText = `-${data.maxDrawdown.toFixed(2)}%`;
+            document.getElementById('kpi-winrate').innerText = `Win Rate: ${data.tradeStats?.winRate ?? 0}%`;
+
+            renderCharts(data);
+            renderPositionsTable(data.openPositions);
+            renderTradesTable(data.trades);
+        }
+
+        function renderCharts(data) {
+            const chartDefaults = {
                 responsive: true,
-                cutout: '70%',
-                plugins: {
-                    legend: {
-                        position: 'bottom',
-                        labels: { color: '#eaecef', font: { size: 12 } }
-                    }
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+                scales: {
+                    x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#848e9c', maxTicksLimit: 6 } },
+                    y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#848e9c' } }
                 }
             };
+
+            const eqCtx = document.getElementById('equityChart').getContext('2d');
+            if (equityChart) equityChart.destroy();
+
+            const eqLabels = data.equityCurve.map(p => fmtDate(p.time));
+            const eqValues = data.equityCurve.map(p => p.equity);
+
+            const isPos = data.totalProfit >= 0;
+            const gradient = eqCtx.createLinearGradient(0, 0, 0, 300);
+            if (isPos) {
+                gradient.addColorStop(0, 'rgba(14, 203, 129, 0.25)');
+                gradient.addColorStop(1, 'rgba(14, 203, 129, 0.0)');
+            } else {
+                gradient.addColorStop(0, 'rgba(246, 70, 93, 0.25)');
+                gradient.addColorStop(1, 'rgba(246, 70, 93, 0.0)');
+            }
+
+            equityChart = new Chart(eqCtx, {
+                type: 'line',
+                data: {
+                    labels: eqLabels,
+                    datasets: [{
+                        data: eqValues,
+                        borderColor: isPos ? '#0ecb81' : '#f6465d',
+                        backgroundColor: gradient,
+                        borderWidth: 2.5,
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 4,
+                        pointBackgroundColor: isPos ? '#0ecb81' : '#f6465d'
+                    }]
+                },
+                options: chartDefaults
+            });
+
+            const ddCtx = document.getElementById('drawdownChart').getContext('2d');
+            if (drawdownChart) drawdownChart.destroy();
+
+            const ddLabels = data.drawdownCurve.map(p => fmtDate(p.time));
+            const ddValues = data.drawdownCurve.map(p => -p.drawdown);
+
+            const ddGradient = ddCtx.createLinearGradient(0, 0, 0, 300);
+            ddGradient.addColorStop(0, 'rgba(246, 70, 93, 0.0)');
+            ddGradient.addColorStop(1, 'rgba(246, 70, 93, 0.25)');
+
+            drawdownChart = new Chart(ddCtx, {
+                type: 'line',
+                data: {
+                    labels: ddLabels,
+                    datasets: [{
+                        data: ddValues,
+                        borderColor: '#f6465d',
+                        backgroundColor: ddGradient,
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 3,
+                        pointBackgroundColor: '#f6465d'
+                    }]
+                },
+                options: chartDefaults
+            });
+        }
+
+        function renderPositionsTable(positions) {
+            const tbody = document.getElementById('positions-tbody');
+            if (!positions.length) {
+                tbody.innerHTML = `<tr><td colspan="9" class="empty-row">No hay posiciones abiertas en este canal.</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = positions.map(pos => {
+                const isPos = pos.unrealizedProfit >= 0;
+                const sideCls = pos.side === 'short' ? 'badge-short' : 'badge-long';
+                const channelName = pos.channel || getCurrentData().title || '';
+                return `
+                    <tr>
+                        <td style="font-weight: 700">#${pos.symbol.replace('USDC', '')}</td>
+                        <td style="color: var(--text-muted); font-size: 12px">${channelName}</td>
+                        <td><span class="badge ${sideCls}">${(pos.side || 'long').toUpperCase()}</span></td>
+                        <td>${fmtDateTime(pos.buyTime)}</td>
+                        <td>${formatPrice(pos.entryPrice || pos.buyPrice)}</td>
+                        <td style="font-weight: 600">${formatPrice(pos.currentPrice)}</td>
+                        <td>${pos.investedUSDC.toFixed(2)}</td>
+                        <td>${pos.marketValue.toFixed(2)}</td>
+                        <td class="${isPos ? 'positive' : 'negative'}" style="font-weight: 700">
+                            ${isPos ? '+' : ''}${pos.unrealizedProfit.toFixed(2)} (${isPos ? '+' : ''}${pos.unrealizedProfitPct.toFixed(2)}%)
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function renderTradesTable(trades) {
+            const tbody = document.getElementById('trades-tbody');
+            if (!trades.length) {
+                tbody.innerHTML = `<tr><td colspan="10" class="empty-row">No hay operaciones cerradas registradas en este canal.</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = trades.map(t => {
+                const isPos = t.profit >= 0;
+                const sideCls = (t.side || 'long') === 'short' ? 'badge-short' : 'badge-long';
+                const reasonCls = t.reason === 'TAKE_PROFIT' ? 'badge-tp' : t.reason === 'STOP_LOSS' ? 'badge-sl' : t.reason === 'TRAILING_STOP' ? 'badge-trail' : 'badge-signal';
+                const channelName = t.channel || getCurrentData().title || '';
+                return `
+                    <tr>
+                        <td style="font-weight: 700">#${t.symbol.replace('USDC', '')}</td>
+                        <td style="color: var(--text-muted); font-size: 12px">${channelName}</td>
+                        <td><span class="badge ${sideCls}">${(t.side || 'long').toUpperCase()}</span></td>
+                        <td>${fmtDateTime(t.buyTime)}</td>
+                        <td>${fmtDateTime(t.sellTime)}</td>
+                        <td>${formatPrice(t.buyPrice)}</td>
+                        <td>${formatPrice(t.sellPrice)}</td>
+                        <td class="${isPos ? 'positive' : 'negative'}" style="font-weight: 700">${isPos ? '+' : ''}${t.profit.toFixed(2)}</td>
+                        <td class="${isPos ? 'positive' : 'negative'}">${isPos ? '+' : ''}${t.profitPct.toFixed(2)}%</td>
+                        <td><span class="badge ${reasonCls}">${t.reason.replace('_', ' ')}</span></td>
+                    </tr>
+                `;
+            }).join('');
         }
 
         function fmtDate(value) {
+            if (!value) return '';
             return new Date(value).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' });
         }
 
         function fmtDateTime(value) {
+            if (!value) return '--';
             const date = new Date(value);
             return `${date.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })} ${date.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}`;
         }
 
-        function formatPrice(value) {
-            if (value === null || value === undefined) return '--';
-            if (value >= 1000) return value.toFixed(2);
-            if (value >= 1) return value.toFixed(4);
-            return value.toPrecision(4);
+        function formatPrice(val) {
+            if (val === null || val === undefined || isNaN(val)) return '--';
+            if (val >= 1000) return val.toFixed(2);
+            if (val >= 1) return val.toFixed(4);
+            return val.toPrecision(4);
         }
 
         window.onload = loadData;

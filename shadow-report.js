@@ -4,11 +4,32 @@ import { spawnSync } from 'child_process';
 import binance from './binanceService.js';
 
 const STORE_NAME = 'shadow_trading_state';
-const STORE_KEY = 'bot_state_v2';
-const DEFAULT_SYNC_FILE = 'shadow_trades_sync.json';
+const CHANNELS_CONFIG = {
+  daily: {
+    id: 'daily',
+    title: '📅 SMA150-1d (Long-Only)',
+    storeKey: 'bot_state_daily_v1',
+    syncFile: 'sync_daily.json',
+    initialBalance: 5000
+  },
+  ls: {
+    id: 'ls',
+    title: '↕️ SMA150-LS (Long/Short)',
+    storeKey: 'bot_state_ls_v1',
+    syncFile: 'sync_ls.json',
+    initialBalance: 5000
+  },
+  rotation: {
+    id: 'rotation',
+    title: '🔄 ROT-dual-mom (Rotación)',
+    storeKey: 'bot_state_rotation_v1',
+    syncFile: 'sync_rotation.json',
+    initialBalance: 5000
+  }
+};
+
 const DEFAULT_DATA_FILE = 'shadow-report-results.json';
 const DEFAULT_HTML_OUTPUT = 'shadow-report-output.html';
-const INITIAL_BALANCE = 5000;
 const TRAIL_DISTANCE = 0.45;
 
 function parseArgs() {
@@ -16,8 +37,7 @@ function parseArgs() {
   const findValue = (prefix) => args.find(arg => arg.startsWith(prefix))?.split('=').slice(1).join('=');
 
   return {
-    input: findValue('--input='),
-    syncFile: findValue('--sync-file=') || DEFAULT_SYNC_FILE,
+    channel: findValue('--channel=') || 'all',
     jsonOutput: findValue('--json-output=') || DEFAULT_DATA_FILE,
     htmlOutput: findValue('--html-output=') || DEFAULT_HTML_OUTPUT,
     syncTimeoutMs: Number(findValue('--sync-timeout-ms=')) || 15000,
@@ -41,54 +61,59 @@ function parseDate(value) {
   return Number.isNaN(timestamp) ? null : timestamp;
 }
 
-function syncBlobState(outputFile, timeoutMs) {
-  console.log('☁️ Descargando estado actual desde Netlify Blobs...');
-
+function syncBlobState(storeKey, outputFile, timeoutMs) {
+  console.log(`☁️ Descargando ${storeKey} desde Netlify Blobs...`);
   const result = spawnSync(
     'npx',
-    ['netlify', 'blobs:get', STORE_NAME, STORE_KEY, '--output', outputFile],
+    ['netlify', 'blobs:get', STORE_NAME, storeKey, '--output', outputFile],
     { encoding: 'utf-8', timeout: timeoutMs }
   );
 
   if (result.error?.code === 'ETIMEDOUT') {
-    throw new Error(`La descarga desde Netlify superó el timeout de ${timeoutMs}ms`);
+    throw new Error(`La descarga de ${storeKey} superó el timeout de ${timeoutMs}ms`);
   }
 
   if (result.status !== 0) {
     const details = result.stderr?.trim() || result.stdout?.trim() || 'Error desconocido';
-    throw new Error(`No se pudo descargar el blob ${STORE_NAME}/${STORE_KEY}: ${details}`);
+    throw new Error(`No se pudo descargar el blob ${STORE_NAME}/${storeKey}: ${details}`);
   }
 
-  console.log(`✅ Estado sincronizado en ${outputFile}`);
+  console.log(`✅ Estado ${storeKey} sincronizado en ${outputFile}`);
 }
 
-function loadState(filePath) {
-  const raw = fs.readFileSync(filePath, 'utf-8');
-  const state = JSON.parse(raw);
-
-  return {
-    balanceUSDC: Number(state.balanceUSDC || 0),
-    openPositions: state.openPositions || {},
-    tradeHistory: Array.isArray(state.tradeHistory) ? state.tradeHistory : []
-  };
-}
-
-async function fetchCurrentPrices(symbols) {
-  const entries = await Promise.all(
-    symbols.map(async (symbol) => {
-      const candles = await binance.getKlines(symbol, '15m', 1);
-      const currentPrice = candles[0]?.close || null;
-      return [symbol, currentPrice];
-    })
-  );
-
-  return Object.fromEntries(entries);
+function loadState(filePath, initialBalance = 5000) {
+  if (!fs.existsSync(filePath)) {
+    return {
+      balanceUSDC: initialBalance,
+      openPositions: {},
+      tradeHistory: []
+    };
+  }
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const state = JSON.parse(raw);
+    return {
+      balanceUSDC: Number(state.balanceUSDC ?? initialBalance),
+      openPositions: state.openPositions || {},
+      tradeHistory: Array.isArray(state.tradeHistory) ? state.tradeHistory : [],
+      circuitBreakerPausedUntil: state.circuitBreakerPausedUntil || null,
+      lastRebalanceTime: state.lastRebalanceTime || null
+    };
+  } catch (err) {
+    console.warn(`⚠️ Error leyendo ${filePath}:`, err.message);
+    return {
+      balanceUSDC: initialBalance,
+      openPositions: {},
+      tradeHistory: []
+    };
+  }
 }
 
 function normalizeTrades(tradeHistory) {
   return tradeHistory
     .map((trade) => ({
       symbol: trade.symbol,
+      side: trade.side || 'long',
       buyPrice: Number(trade.buyPrice || 0),
       sellPrice: Number(trade.sellPrice || 0),
       amount: Number(trade.amount || 0),
@@ -163,23 +188,39 @@ function buildOpenPositions(openPositions, priceMap) {
   return Object.entries(openPositions)
     .map(([symbol, position]) => {
       const currentPrice = Number(priceMap[symbol] || position.buyPrice || 0);
-      const invested = Number(position.investedUSDC || 0);
+      const isShort = position.side === 'short';
+      const entryPrice = Number(position.entryPrice ?? position.buyPrice ?? 0);
+      const invested = Number(position.investedUSDC || position.marginUSDC || 0);
       const amount = Number(position.amount || 0);
-      const marketValue = amount * currentPrice;
-      const unrealizedProfit = marketValue - invested;
-      const unrealizedProfitPct = invested > 0 ? (unrealizedProfit / invested) * 100 : 0;
-      const peakPrice = Number(position.peakPrice || position.buyPrice || 0);
-      const peakProfitPct = position.buyPrice > 0
-        ? ((peakPrice - position.buyPrice) / position.buyPrice) * 100
+
+      let marketValue = 0;
+      let unrealizedProfit = 0;
+      let unrealizedProfitPct = 0;
+
+      if (isShort) {
+        unrealizedProfit = (entryPrice - currentPrice) * amount;
+        marketValue = invested + unrealizedProfit;
+        unrealizedProfitPct = invested > 0 ? (unrealizedProfit / invested) * 100 : 0;
+      } else {
+        marketValue = amount * currentPrice;
+        unrealizedProfit = marketValue - invested;
+        unrealizedProfitPct = invested > 0 ? (unrealizedProfit / invested) * 100 : 0;
+      }
+
+      const peakPrice = Number(position.peakPrice || entryPrice);
+      const peakProfitPct = entryPrice > 0
+        ? ((peakPrice - entryPrice) / entryPrice) * 100
         : 0;
       const trailingStopPrice = position.trailingActivated
-        ? position.buyPrice * (1 + ((peakProfitPct * TRAIL_DISTANCE) / 100))
+        ? entryPrice * (1 + ((peakProfitPct * TRAIL_DISTANCE) / 100))
         : null;
 
       return {
         symbol,
+        side: isShort ? 'short' : 'long',
         amount,
-        buyPrice: Number(position.buyPrice || 0),
+        buyPrice: entryPrice,
+        entryPrice,
         currentPrice,
         investedUSDC: round(invested),
         marketValue: round(marketValue),
@@ -240,62 +281,94 @@ function buildEquityCurve(trades, openPositions, initialBalance, currentTotalEqu
   };
 }
 
-function buildReportData(state, openPositions, trades, tradeStats, curveData, meta) {
-  const availableBalance = round(state.balanceUSDC);
-  const investedCost = round(openPositions.reduce((sum, position) => sum + position.investedUSDC, 0));
-  const currentMarketValue = round(openPositions.reduce((sum, position) => sum + position.marketValue, 0));
-  const realizedProfit = round(trades.reduce((sum, trade) => sum + trade.profit, 0));
-  const currentTotalEquity = round(availableBalance + currentMarketValue);
-  const unrealizedProfit = round(currentMarketValue - investedCost);
-  const totalProfit = round(currentTotalEquity - meta.initialBalance);
-  const roi = meta.initialBalance > 0 ? round((totalProfit / meta.initialBalance) * 100) : 0;
-  const trailingActiveCount = openPositions.filter((position) => position.trailingActivated).length;
-  const activeSinceCandidates = [
-    ...trades.map((trade) => parseDate(trade.buyTime)).filter(Boolean),
-    ...openPositions.map((position) => parseDate(position.buyTime)).filter(Boolean)
-  ];
+function processChannelData(channelKey, cfg, priceMap, generatedAt) {
+  const filePath = path.resolve(cfg.syncFile);
+  const state = loadState(filePath, cfg.initialBalance);
+  const openPositions = buildOpenPositions(state.openPositions, priceMap);
+  const trades = normalizeTrades(state.tradeHistory);
+  const tradeStats = buildTradeStats(trades);
 
-  const activeSince = activeSinceCandidates.length > 0
-    ? new Date(Math.min(...activeSinceCandidates)).toISOString()
-    : meta.generatedAt;
+  const availableBalance = round(state.balanceUSDC);
+  const investedCost = round(openPositions.reduce((sum, p) => sum + p.investedUSDC, 0));
+  const currentMarketValue = round(openPositions.reduce((sum, p) => sum + p.marketValue, 0));
+  const realizedProfit = round(trades.reduce((sum, t) => sum + t.profit, 0));
+  const currentTotalEquity = round(availableBalance + currentMarketValue);
+  const unrealizedProfit = round(openPositions.reduce((sum, p) => sum + p.unrealizedProfit, 0));
+  const totalProfit = round(currentTotalEquity - cfg.initialBalance);
+  const roi = cfg.initialBalance > 0 ? round((totalProfit / cfg.initialBalance) * 100) : 0;
+
+  const curveData = buildEquityCurve(trades, openPositions, cfg.initialBalance, currentTotalEquity, generatedAt);
 
   return {
-    summary: {
-      reportType: 'Shadow Mode',
-      generatedAt: meta.generatedAt,
-      stateSource: meta.stateSource,
-      blobStore: STORE_NAME,
-      blobKey: STORE_KEY,
-      initialBalance: meta.initialBalance,
-      availableBalance,
-      investedCost,
-      currentMarketValue,
-      currentTotalEquity,
-      realizedProfit,
-      unrealizedProfit,
-      totalProfit,
-      roi,
-      activeSince,
-      totalTrades: tradeStats.totalTrades,
-      winningTrades: tradeStats.winningTrades,
-      losingTrades: tradeStats.losingTrades,
-      winRate: tradeStats.winRate,
-      profitFactor: tradeStats.profitFactor,
-      avgWin: tradeStats.avgWin,
-      avgLoss: tradeStats.avgLoss,
-      expectancy: tradeStats.expectancy,
-      avgDurationHours: tradeStats.avgDurationHours,
-      maxDrawdown: curveData.maxDrawdown,
-      openPositionsCount: openPositions.length,
-      trailingActiveCount,
-      byReason: tradeStats.byReason,
-      bySymbol: tradeStats.bySymbol,
-      reconstructionNote: 'La curva y el drawdown se reconstruyen con cierres realizados y un snapshot actual de posiciones abiertas.'
-    },
-    trades,
+    id: channelKey,
+    title: cfg.title,
+    storeKey: cfg.storeKey,
+    initialBalance: cfg.initialBalance,
+    availableBalance,
+    investedCost,
+    currentMarketValue,
+    currentTotalEquity,
+    realizedProfit,
+    unrealizedProfit,
+    totalProfit,
+    roi,
+    circuitBreakerPausedUntil: state.circuitBreakerPausedUntil,
+    lastRebalanceTime: state.lastRebalanceTime,
     openPositions,
+    trades,
+    tradeStats,
     equityCurve: curveData.equityCurve,
-    drawdownCurve: curveData.drawdownCurve
+    drawdownCurve: curveData.drawdownCurve,
+    maxDrawdown: curveData.maxDrawdown
+  };
+}
+
+function processPortfolio(channelResults, generatedAt) {
+  let initialBalance = 0;
+  let availableBalance = 0;
+  let investedCost = 0;
+  let currentMarketValue = 0;
+  let currentTotalEquity = 0;
+  let realizedProfit = 0;
+  let unrealizedProfit = 0;
+  const allOpenPositions = [];
+  const allTrades = [];
+
+  for (const ch of Object.values(channelResults)) {
+    initialBalance += ch.initialBalance;
+    availableBalance += ch.availableBalance;
+    investedCost += ch.investedCost;
+    currentMarketValue += ch.currentMarketValue;
+    currentTotalEquity += ch.currentTotalEquity;
+    realizedProfit += ch.realizedProfit;
+    unrealizedProfit += ch.unrealizedProfit;
+    ch.openPositions.forEach(p => allOpenPositions.push({ ...p, channel: ch.title }));
+    ch.trades.forEach(t => allTrades.push({ ...t, channel: ch.title }));
+  }
+
+  const totalProfit = round(currentTotalEquity - initialBalance);
+  const roi = initialBalance > 0 ? round((totalProfit / initialBalance) * 100) : 0;
+  const tradeStats = buildTradeStats(allTrades);
+  const curveData = buildEquityCurve(allTrades, allOpenPositions, initialBalance, currentTotalEquity, generatedAt);
+
+  return {
+    id: 'portfolio',
+    title: '🌐 Cartera Global Consolidada',
+    initialBalance: round(initialBalance),
+    availableBalance: round(availableBalance),
+    investedCost: round(investedCost),
+    currentMarketValue: round(currentMarketValue),
+    currentTotalEquity: round(currentTotalEquity),
+    realizedProfit: round(realizedProfit),
+    unrealizedProfit: round(unrealizedProfit),
+    totalProfit: round(totalProfit),
+    roi,
+    openPositions: allOpenPositions.sort((a, b) => b.marketValue - a.marketValue),
+    trades: allTrades.sort((a, b) => (parseDate(b.sellTime) || 0) - (parseDate(a.sellTime) || 0)),
+    tradeStats,
+    equityCurve: curveData.equityCurve,
+    drawdownCurve: curveData.drawdownCurve,
+    maxDrawdown: curveData.maxDrawdown
   };
 }
 
@@ -311,59 +384,85 @@ function injectDataIntoTemplate(templatePath, outputPath, data) {
 
 async function main() {
   const args = parseArgs();
-  const syncFilePath = path.resolve(args.syncFile);
-  const inputPath = path.resolve(args.input || args.syncFile);
   const jsonOutputPath = path.resolve(args.jsonOutput);
   const htmlOutputPath = path.resolve(args.htmlOutput);
   const templatePath = path.resolve('shadow-report.html');
+  const generatedAt = new Date().toISOString();
 
   try {
-    if (!args.skipSync && !args.input) {
-      try {
-        syncBlobState(syncFilePath, args.syncTimeoutMs);
-      } catch (syncError) {
-        if (!fs.existsSync(syncFilePath)) {
-          throw syncError;
+    if (!args.skipSync) {
+      console.log('🔄 Sincronizando estados desde Netlify Blobs...');
+      for (const key of Object.keys(CHANNELS_CONFIG)) {
+        const cfg = CHANNELS_CONFIG[key];
+        const syncPath = path.resolve(cfg.syncFile);
+        try {
+          syncBlobState(cfg.storeKey, syncPath, args.syncTimeoutMs);
+        } catch (err) {
+          console.warn(`⚠️ No se pudo sincronizar ${cfg.storeKey} (${err.message}). Usando local.`);
         }
-
-        console.warn(`⚠️ ${syncError.message}`);
-        console.warn(`⚠️ Usando la última copia local disponible en ${syncFilePath}`);
       }
-    } else if (!fs.existsSync(inputPath)) {
-      throw new Error(`No existe el archivo de entrada: ${inputPath}`);
     }
 
-    const state = loadState(inputPath);
-    const symbols = Object.keys(state.openPositions);
-    const priceMap = symbols.length > 0 ? await fetchCurrentPrices(symbols) : {};
-    const openPositions = buildOpenPositions(state.openPositions, priceMap);
-    const trades = normalizeTrades(state.tradeHistory);
-    const tradeStats = buildTradeStats(trades);
-    const generatedAt = new Date().toISOString();
-    const currentTotalEquity = round(
-      state.balanceUSDC + openPositions.reduce((sum, position) => sum + position.marketValue, 0)
-    );
-    const curveData = buildEquityCurve(trades, openPositions, INITIAL_BALANCE, currentTotalEquity, generatedAt);
-    const reportData = buildReportData(state, openPositions, trades, tradeStats, curveData, {
-      initialBalance: INITIAL_BALANCE,
-      generatedAt,
-      stateSource: inputPath
-    });
+    // 1. Recopilar todos los símbolos abiertos en todos los canales
+    const allSymbols = new Set();
+    for (const key of Object.keys(CHANNELS_CONFIG)) {
+      const cfg = CHANNELS_CONFIG[key];
+      const state = loadState(path.resolve(cfg.syncFile), cfg.initialBalance);
+      Object.keys(state.openPositions).forEach(s => allSymbols.add(s));
+    }
+
+    // 2. Precios en tiempo real
+    const priceMap = allSymbols.size > 0 ? await binance.getPrices([...allSymbols]) : {};
+
+    // 3. Procesar cada canal
+    const channels = {};
+    for (const key of Object.keys(CHANNELS_CONFIG)) {
+      const cfg = CHANNELS_CONFIG[key];
+      channels[key] = processChannelData(key, cfg, priceMap, generatedAt);
+    }
+
+    // 4. Procesar cartera consolidada
+    const portfolio = processPortfolio(channels, generatedAt);
+
+    const reportData = {
+      summary: {
+        reportType: 'Multi-Channel Shadow Mode',
+        generatedAt,
+        initialBalance: portfolio.initialBalance,
+        availableBalance: portfolio.availableBalance,
+        investedCost: portfolio.investedCost,
+        currentMarketValue: portfolio.currentMarketValue,
+        currentTotalEquity: portfolio.currentTotalEquity,
+        realizedProfit: portfolio.realizedProfit,
+        unrealizedProfit: portfolio.unrealizedProfit,
+        totalProfit: portfolio.totalProfit,
+        roi: portfolio.roi,
+        totalTrades: portfolio.tradeStats.totalTrades,
+        openPositionsCount: portfolio.openPositions.length,
+        maxDrawdown: portfolio.maxDrawdown
+      },
+      portfolio,
+      channels
+    };
 
     fs.writeFileSync(jsonOutputPath, JSON.stringify(reportData, null, 2));
     injectDataIntoTemplate(templatePath, htmlOutputPath, reportData);
 
-    console.log('╔══════════════════════════════════════════════════════╗');
-    console.log('║            BINANCE BOT SHADOW REPORT                ║');
-    console.log('╚══════════════════════════════════════════════════════╝');
-    console.log(`💼 Equity actual:     ${reportData.summary.currentTotalEquity.toFixed(2)} USDC`);
-    console.log(`📈 ROI total:         ${reportData.summary.roi >= 0 ? '+' : ''}${reportData.summary.roi}%`);
-    console.log(`💵 P&L realizado:     ${reportData.summary.realizedProfit >= 0 ? '+' : ''}${reportData.summary.realizedProfit.toFixed(2)} USDC`);
-    console.log(`📍 P&L no realizado:  ${reportData.summary.unrealizedProfit >= 0 ? '+' : ''}${reportData.summary.unrealizedProfit.toFixed(2)} USDC`);
-    console.log(`🔓 Posiciones abiertas:${reportData.summary.openPositionsCount}`);
-    console.log(`📊 Trades cerrados:   ${reportData.summary.totalTrades}`);
-    console.log(`🗂️ JSON guardado en:   ${jsonOutputPath}`);
-    console.log(`🖥️ HTML guardado en:   ${htmlOutputPath}`);
+    console.log('\n╔═════════════════════════════════════════════════════════════════╗');
+    console.log('║            BINANCE BOT MULTI-CHANNEL SHADOW REPORT              ║');
+    console.log('╚═════════════════════════════════════════════════════════════════╝');
+    console.log(`💼 Equity Total Global:  ${portfolio.currentTotalEquity.toFixed(2)} USDC (Inicial: ${portfolio.initialBalance.toFixed(2)} USDC)`);
+    console.log(`📈 ROI Global:           ${portfolio.roi >= 0 ? '+' : ''}${portfolio.roi}% (${portfolio.totalProfit >= 0 ? '+' : ''}${portfolio.totalProfit.toFixed(2)} USDC)`);
+    console.log(`💵 P&L Realizado:        ${portfolio.realizedProfit >= 0 ? '+' : ''}${portfolio.realizedProfit.toFixed(2)} USDC`);
+    console.log(`📍 P&L Latente:          ${portfolio.unrealizedProfit >= 0 ? '+' : ''}${portfolio.unrealizedProfit.toFixed(2)} USDC`);
+    console.log(`🔓 Posiciones Abiertas:  ${portfolio.openPositions.length}`);
+    console.log('─────────────────────────────────────────────────────────────────');
+    for (const ch of Object.values(channels)) {
+      console.log(`  ${ch.title.padEnd(30)} Equity: ${ch.currentTotalEquity.toFixed(2)} USDC | ROI: ${(ch.roi >= 0 ? '+' : '') + ch.roi}% | Pos: ${ch.openPositions.length}`);
+    }
+    console.log('─────────────────────────────────────────────────────────────────');
+    console.log(`🗂️ JSON guardado en:      ${jsonOutputPath}`);
+    console.log(`🖥️ HTML guardado en:      ${htmlOutputPath}\n`);
 
     if (process.platform === 'darwin' && !args.noOpen) {
       spawnSync('open', [htmlOutputPath], { stdio: 'ignore' });

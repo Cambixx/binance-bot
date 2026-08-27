@@ -83,7 +83,8 @@ class TelegramService {
 // Comandos que el bot expone en el menú "/" de Telegram (deben coincidir con los que maneja el webhook).
 // Nombre del comando: solo minúsculas/dígitos/_ (sin acentos), 1-32 chars.
 export const BOT_COMMANDS = [
-  { command: 'status', description: '📊 Estado y P&L de todos los canales' },
+  { command: 'status', description: '📊 Estado y P&L por canal' },
+  { command: 'portfolio', description: '🌐 Resumen consolidado de la cartera global' },
   { command: 'posiciones', description: '📌 Posiciones abiertas con P&L latente' },
   { command: 'trades', description: '🧾 Últimas operaciones cerradas' },
   { command: 'help', description: '❓ Ayuda y comandos disponibles' },

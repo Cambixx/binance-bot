@@ -366,7 +366,7 @@ class BacktestEngine {
           if (pos && pos.side === 'long') this.executeSell(symbol, close, time, 'SIGNAL');
           // No re-shortear durante el cooldown post-stop, y solo si el filtro de entrada lo permite.
           const entryOk = shortEntryAllowed(buf.closes, { ...this.shortEntry, smaPeriod: this.regimeOpts.smaPeriod ?? 150 });
-          if (!this.state.openPositions[symbol] && !isOnCooldown && entryOk && this.canOpenPosition(currentPrices)) this.executeShortOpen(symbol, close, time, buf);
+          if (!this.state.openPositions[symbol] && !isOnCooldown && entryOk && this.canOpenPosition(currentPrices) && this.shortAllowedByBtc()) this.executeShortOpen(symbol, close, time, buf);
         }
         this.trackDrawdown(time, currentPrices);
         this.recordEquity(time, currentPrices);
@@ -458,6 +458,15 @@ class BacktestEngine {
 
   // Gate maestro BTC para entradas LARGAS (candidata btcGateLong): si BTC < SMA(period), no se
   // abren largos nuevos. Sin datos suficientes de BTC → no bloquear (fail-open, igual que btcRegimeOn).
+  // Gate maestro BTC para entradas CORTAS: si BTC está alcista (Risk-On), NO shortear altcoins.
+  shortAllowedByBtc() {
+    if (!this.btcGateLong || !this._btcKey || !this._candleBuffers?.[this._btcKey]) return true;
+    const c = this._candleBuffers[this._btcKey].closes;
+    const smaPeriod = this.btcGateLong.smaPeriod ?? 200;
+    const btcRiskOn = btcRegimeOn(c, smaPeriod, { ...REGIME, ...this.btcGateLong });
+    return !btcRiskOn;
+  }
+
   longEntryAllowed() {
     if (!this.btcGateLong || !this._btcKey || !this._candleBuffers?.[this._btcKey]) return true;
     const c = this._candleBuffers[this._btcKey].closes;

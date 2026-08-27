@@ -1,157 +1,1066 @@
 {
   "summary": {
-    "reportType": "Shadow Mode",
-    "generatedAt": "2026-05-15T18:12:17.847Z",
-    "stateSource": "/Users/carlosrabago/Documents/binance-bot/shadow_trades_sync.json",
-    "blobStore": "shadow_trading_state",
-    "blobKey": "bot_state_v2",
-    "initialBalance": 5000,
-    "availableBalance": 5061.83,
-    "investedCost": 0,
-    "currentMarketValue": 0,
-    "currentTotalEquity": 5061.83,
-    "realizedProfit": 61.82,
-    "unrealizedProfit": 0,
-    "totalProfit": 61.83,
-    "roi": 1.24,
-    "activeSince": "2026-05-14T06:04:50.348Z",
-    "totalTrades": 4,
-    "winningTrades": 4,
-    "losingTrades": 0,
-    "winRate": 100,
-    "profitFactor": null,
-    "avgWin": 15.46,
-    "avgLoss": 0,
-    "expectancy": 15.46,
-    "avgDurationHours": 6.7,
-    "maxDrawdown": 0,
-    "openPositionsCount": 0,
-    "trailingActiveCount": 0,
-    "byReason": {
-      "SIGNAL": 2,
-      "TRAILING_STOP": 2
-    },
-    "bySymbol": {
-      "LINKUSDC": {
-        "trades": 1,
-        "profit": 38.87,
-        "wins": 1
+    "reportType": "Multi-Channel Shadow Mode",
+    "generatedAt": "2026-08-27T07:07:55.804Z",
+    "initialBalance": 15000,
+    "availableBalance": 4805.78,
+    "investedCost": 9771.36,
+    "currentMarketValue": 10998.74,
+    "currentTotalEquity": 15804.52,
+    "realizedProfit": -422.86,
+    "unrealizedProfit": 1227.36,
+    "totalProfit": 804.52,
+    "roi": 5.36,
+    "totalTrades": 7,
+    "openPositionsCount": 14,
+    "maxDrawdown": 2.82
+  },
+  "portfolio": {
+    "id": "portfolio",
+    "title": "🌐 Cartera Global Consolidada",
+    "initialBalance": 15000,
+    "availableBalance": 4805.78,
+    "investedCost": 9771.36,
+    "currentMarketValue": 10998.74,
+    "currentTotalEquity": 15804.52,
+    "realizedProfit": -422.86,
+    "unrealizedProfit": 1227.36,
+    "totalProfit": 804.52,
+    "roi": 5.36,
+    "openPositions": [
+      {
+        "symbol": "ENAUSDC",
+        "side": "long",
+        "amount": 8505.117117761392,
+        "buyPrice": 0.1174,
+        "entryPrice": 0.1174,
+        "currentPrice": 0.1509,
+        "investedUSDC": 1000,
+        "marketValue": 1283.42,
+        "unrealizedProfit": 283.42,
+        "unrealizedProfitPct": 28.34,
+        "buyTime": "2026-08-21T00:00:29.180Z",
+        "peakPrice": 0.1174,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "🔄 ROT-dual-mom (Rotación)"
       },
-      "BTCUSDC": {
-        "trades": 1,
-        "profit": 12.5,
-        "wins": 1
+      {
+        "symbol": "PUMPUSDC",
+        "side": "long",
+        "amount": 259350.84405849024,
+        "buyPrice": 0.00385,
+        "entryPrice": 0.00385,
+        "currentPrice": 0.00462,
+        "investedUSDC": 1000,
+        "marketValue": 1198.2,
+        "unrealizedProfit": 198.2,
+        "unrealizedProfitPct": 19.82,
+        "buyTime": "2026-08-21T00:00:29.180Z",
+        "peakPrice": 0.00385,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "🔄 ROT-dual-mom (Rotación)"
       },
-      "SOLUSDC": {
-        "trades": 1,
-        "profit": 9.02,
-        "wins": 1
+      {
+        "symbol": "LINKUSDC",
+        "side": "long",
+        "amount": 93.34399828224619,
+        "buyPrice": 10.697,
+        "entryPrice": 10.697,
+        "currentPrice": 11.611,
+        "investedUSDC": 1000,
+        "marketValue": 1083.82,
+        "unrealizedProfit": 83.82,
+        "unrealizedProfitPct": 8.38,
+        "buyTime": "2026-08-21T00:00:29.180Z",
+        "peakPrice": 10.697,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "🔄 ROT-dual-mom (Rotación)"
       },
-      "SAGAUSDC": {
-        "trades": 1,
-        "profit": 1.43,
-        "wins": 1
+      {
+        "symbol": "BTCUSDC",
+        "side": "long",
+        "amount": 0.01366610934200282,
+        "buyPrice": 73064.01,
+        "entryPrice": 73064.01,
+        "currentPrice": 78760.89,
+        "investedUSDC": 1000,
+        "marketValue": 1076.35,
+        "unrealizedProfit": 76.35,
+        "unrealizedProfitPct": 7.64,
+        "buyTime": "2026-08-21T00:00:29.180Z",
+        "peakPrice": 73064.01,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "🔄 ROT-dual-mom (Rotación)"
+      },
+      {
+        "symbol": "ETHUSDC",
+        "side": "long",
+        "amount": 0.42900692581437677,
+        "buyPrice": 2327.47,
+        "entryPrice": 2327.47,
+        "currentPrice": 2490.23,
+        "investedUSDC": 1000,
+        "marketValue": 1068.33,
+        "unrealizedProfit": 68.33,
+        "unrealizedProfitPct": 6.83,
+        "buyTime": "2026-08-21T00:00:29.180Z",
+        "peakPrice": 2327.47,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "🔄 ROT-dual-mom (Rotación)"
+      },
+      {
+        "symbol": "SOLUSDC",
+        "side": "long",
+        "amount": 8.98977017877758,
+        "buyPrice": 85.34,
+        "entryPrice": 85.34,
+        "currentPrice": 101.16,
+        "investedUSDC": 768.34,
+        "marketValue": 909.41,
+        "unrealizedProfit": 141.07,
+        "unrealizedProfitPct": 18.36,
+        "buyTime": "2026-08-20T00:00:27.141Z",
+        "peakPrice": 85.34,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "📅 SMA150-1d (Long-Only)"
+      },
+      {
+        "symbol": "ETHUSDC",
+        "side": "long",
+        "amount": 0.27432969251087225,
+        "buyPrice": 2251.72,
+        "entryPrice": 2251.72,
+        "currentPrice": 2490.23,
+        "investedUSDC": 618.64,
+        "marketValue": 683.14,
+        "unrealizedProfit": 64.5,
+        "unrealizedProfitPct": 10.43,
+        "buyTime": "2026-08-20T00:00:27.141Z",
+        "peakPrice": 2251.72,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "📅 SMA150-1d (Long-Only)"
+      },
+      {
+        "symbol": "LINKUSDC",
+        "side": "long",
+        "amount": 58.29854606508773,
+        "buyPrice": 10.551,
+        "entryPrice": 10.551,
+        "currentPrice": 11.611,
+        "investedUSDC": 616.03,
+        "marketValue": 676.9,
+        "unrealizedProfit": 60.87,
+        "unrealizedProfitPct": 9.88,
+        "buyTime": "2026-08-20T00:00:27.793Z",
+        "peakPrice": 10.551,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      },
+      {
+        "symbol": "BTCUSDC",
+        "side": "long",
+        "amount": 0.008385225386776458,
+        "buyPrice": 73007.44,
+        "entryPrice": 73007.44,
+        "currentPrice": 78760.89,
+        "investedUSDC": 613.1,
+        "marketValue": 660.43,
+        "unrealizedProfit": 47.32,
+        "unrealizedProfitPct": 7.72,
+        "buyTime": "2026-08-21T00:00:26.687Z",
+        "peakPrice": 73007.44,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "📅 SMA150-1d (Long-Only)"
+      },
+      {
+        "symbol": "SOLUSDC",
+        "side": "long",
+        "amount": 6.201505171647948,
+        "buyPrice": 85.34,
+        "entryPrice": 85.34,
+        "currentPrice": 101.16,
+        "investedUSDC": 530.03,
+        "marketValue": 627.34,
+        "unrealizedProfit": 97.31,
+        "unrealizedProfitPct": 18.36,
+        "buyTime": "2026-08-20T00:15:07.303Z",
+        "peakPrice": 85.34,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      },
+      {
+        "symbol": "LINKUSDC",
+        "side": "long",
+        "amount": 51.81346879828286,
+        "buyPrice": 10.551,
+        "entryPrice": 10.551,
+        "currentPrice": 11.611,
+        "investedUSDC": 547.5,
+        "marketValue": 601.61,
+        "unrealizedProfit": 54.1,
+        "unrealizedProfitPct": 9.88,
+        "buyTime": "2026-08-20T00:00:27.142Z",
+        "peakPrice": 10.551,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "📅 SMA150-1d (Long-Only)"
+      },
+      {
+        "symbol": "ETHUSDC",
+        "side": "long",
+        "amount": 0.1892436595163438,
+        "buyPrice": 2251.72,
+        "entryPrice": 2251.72,
+        "currentPrice": 2490.23,
+        "investedUSDC": 426.76,
+        "marketValue": 471.26,
+        "unrealizedProfit": 44.5,
+        "unrealizedProfitPct": 10.43,
+        "buyTime": "2026-08-20T00:15:07.303Z",
+        "peakPrice": 2251.72,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      },
+      {
+        "symbol": "LTCUSDC",
+        "side": "long",
+        "amount": 6.67097343143467,
+        "buyPrice": 53.16,
+        "entryPrice": 53.16,
+        "currentPrice": 49.72,
+        "investedUSDC": 355.16,
+        "marketValue": 331.68,
+        "unrealizedProfit": -23.48,
+        "unrealizedProfitPct": -6.61,
+        "buyTime": "2026-08-22T00:00:22.821Z",
+        "peakPrice": 53.16,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "📅 SMA150-1d (Long-Only)"
+      },
+      {
+        "symbol": "XRPUSDC",
+        "side": "long",
+        "amount": 232.94579761735628,
+        "buyPrice": 1.2679,
+        "entryPrice": 1.2679,
+        "currentPrice": 1.4031,
+        "investedUSDC": 295.8,
+        "marketValue": 326.85,
+        "unrealizedProfit": 31.05,
+        "unrealizedProfitPct": 10.5,
+        "buyTime": "2026-08-21T00:00:26.688Z",
+        "peakPrice": 1.2679,
+        "trailingActivated": false,
+        "trailingStopPrice": null,
+        "channel": "📅 SMA150-1d (Long-Only)"
+      }
+    ],
+    "trades": [
+      {
+        "symbol": "AVAXUSDC",
+        "side": "short",
+        "buyPrice": 6.263,
+        "sellPrice": 7.289,
+        "amount": 49.101199537013805,
+        "profit": -53.91,
+        "profitPct": -17.53,
+        "buyTime": "2026-07-24T12:33:42.172Z",
+        "sellTime": "2026-08-21T00:00:27.221Z",
+        "reason": "TRAILING_STOP",
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      },
+      {
+        "symbol": "LTCUSDC",
+        "side": "short",
+        "buyPrice": 46.95,
+        "sellPrice": 47.81,
+        "amount": 5.669346910754771,
+        "profit": -7.88,
+        "profitPct": -2.96,
+        "buyTime": "2026-07-24T12:33:42.172Z",
+        "sellTime": "2026-08-21T00:00:27.221Z",
+        "reason": "TRAILING_STOP",
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      },
+      {
+        "symbol": "SOLUSDC",
+        "side": "short",
+        "buyPrice": 75.82,
+        "sellPrice": 85.34,
+        "amount": 8.441044579266684,
+        "profit": -87.48,
+        "profitPct": -13.67,
+        "buyTime": "2026-07-24T12:33:42.171Z",
+        "sellTime": "2026-08-20T00:00:27.793Z",
+        "reason": "TRAILING_STOP",
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      },
+      {
+        "symbol": "XRPUSDC",
+        "side": "short",
+        "buyPrice": 1.1071,
+        "sellPrice": 1.1054,
+        "amount": 462.46951494896575,
+        "profit": -4.82,
+        "profitPct": -0.94,
+        "buyTime": "2026-07-24T12:33:42.172Z",
+        "sellTime": "2026-08-20T00:00:27.793Z",
+        "reason": "TRAILING_STOP",
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      },
+      {
+        "symbol": "ETHUSDC",
+        "side": "short",
+        "buyPrice": 1877.28,
+        "sellPrice": 2251.72,
+        "amount": 0.42614847012699225,
+        "profit": -168.56,
+        "profitPct": -21.07,
+        "buyTime": "2026-07-24T12:33:42.171Z",
+        "sellTime": "2026-08-20T00:00:27.792Z",
+        "reason": "TRAILING_STOP",
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      },
+      {
+        "symbol": "BTCUSDC",
+        "side": "short",
+        "buyPrice": 65058.35,
+        "sellPrice": 69300.84,
+        "amount": 0.015370817120323526,
+        "profit": -76.25,
+        "profitPct": -7.63,
+        "buyTime": "2026-07-24T12:33:42.171Z",
+        "sellTime": "2026-08-20T00:00:27.791Z",
+        "reason": "TRAILING_STOP",
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      },
+      {
+        "symbol": "LINKUSDC",
+        "side": "short",
+        "buyPrice": 8.462,
+        "sellPrice": 8.879,
+        "amount": 48.4046324745923,
+        "profit": -23.96,
+        "profitPct": -5.85,
+        "buyTime": "2026-07-24T12:33:42.172Z",
+        "sellTime": "2026-08-14T00:00:40.381Z",
+        "reason": "SIGNAL",
+        "channel": "↕️ SMA150-LS (Long/Short)"
+      }
+    ],
+    "tradeStats": {
+      "totalTrades": 7,
+      "winningTrades": 0,
+      "losingTrades": 7,
+      "winRate": 0,
+      "grossProfit": 0,
+      "grossLoss": 422.86,
+      "profitFactor": 0,
+      "avgWin": 0,
+      "avgLoss": 60.41,
+      "expectancy": -60.41,
+      "avgDurationHours": 621.7,
+      "byReason": {
+        "SIGNAL": 1,
+        "TRAILING_STOP": 6
+      },
+      "bySymbol": {
+        "LINKUSDC": {
+          "trades": 1,
+          "profit": -23.96,
+          "wins": 0
+        },
+        "BTCUSDC": {
+          "trades": 1,
+          "profit": -76.25,
+          "wins": 0
+        },
+        "ETHUSDC": {
+          "trades": 1,
+          "profit": -168.56,
+          "wins": 0
+        },
+        "SOLUSDC": {
+          "trades": 1,
+          "profit": -87.48,
+          "wins": 0
+        },
+        "XRPUSDC": {
+          "trades": 1,
+          "profit": -4.82,
+          "wins": 0
+        },
+        "AVAXUSDC": {
+          "trades": 1,
+          "profit": -53.91,
+          "wins": 0
+        },
+        "LTCUSDC": {
+          "trades": 1,
+          "profit": -7.88,
+          "wins": 0
+        }
       }
     },
-    "reconstructionNote": "La curva y el drawdown se reconstruyen con cierres realizados y un snapshot actual de posiciones abiertas."
+    "equityCurve": [
+      {
+        "time": 1784896422171,
+        "equity": 15000
+      },
+      {
+        "time": 1786665640381,
+        "equity": 14976.04
+      },
+      {
+        "time": 1787184027791,
+        "equity": 14899.79
+      },
+      {
+        "time": 1787184027792,
+        "equity": 14731.23
+      },
+      {
+        "time": 1787184027793,
+        "equity": 14643.75
+      },
+      {
+        "time": 1787184027793,
+        "equity": 14638.93
+      },
+      {
+        "time": 1787270427221,
+        "equity": 14585.02
+      },
+      {
+        "time": 1787270427221,
+        "equity": 14577.14
+      },
+      {
+        "time": 1787814475804,
+        "equity": 15804.52
+      }
+    ],
+    "drawdownCurve": [
+      {
+        "time": 1784896422171,
+        "drawdown": 0
+      },
+      {
+        "time": 1786665640381,
+        "drawdown": 0.16
+      },
+      {
+        "time": 1787184027791,
+        "drawdown": 0.67
+      },
+      {
+        "time": 1787184027792,
+        "drawdown": 1.79
+      },
+      {
+        "time": 1787184027793,
+        "drawdown": 2.38
+      },
+      {
+        "time": 1787184027793,
+        "drawdown": 2.41
+      },
+      {
+        "time": 1787270427221,
+        "drawdown": 2.77
+      },
+      {
+        "time": 1787270427221,
+        "drawdown": 2.82
+      },
+      {
+        "time": 1787814475804,
+        "drawdown": 0
+      }
+    ],
+    "maxDrawdown": 2.82
   },
-  "trades": [
-    {
-      "symbol": "LINKUSDC",
-      "buyPrice": 10.29,
-      "sellPrice": 10.69,
-      "amount": 97.18172983479107,
-      "profit": 38.87,
-      "profitPct": 3.89,
-      "buyTime": "2026-05-14T06:04:50.348Z",
-      "sellTime": "2026-05-14T16:06:19.981Z",
-      "reason": "SIGNAL"
+  "channels": {
+    "daily": {
+      "id": "daily",
+      "title": "📅 SMA150-1d (Long-Only)",
+      "storeKey": "bot_state_daily_v1",
+      "initialBalance": 5000,
+      "availableBalance": 1801.46,
+      "investedCost": 3198.54,
+      "currentMarketValue": 3513.12,
+      "currentTotalEquity": 5314.58,
+      "realizedProfit": 0,
+      "unrealizedProfit": 314.56,
+      "totalProfit": 314.58,
+      "roi": 6.29,
+      "circuitBreakerPausedUntil": null,
+      "lastRebalanceTime": null,
+      "openPositions": [
+        {
+          "symbol": "SOLUSDC",
+          "side": "long",
+          "amount": 8.98977017877758,
+          "buyPrice": 85.34,
+          "entryPrice": 85.34,
+          "currentPrice": 101.16,
+          "investedUSDC": 768.34,
+          "marketValue": 909.41,
+          "unrealizedProfit": 141.07,
+          "unrealizedProfitPct": 18.36,
+          "buyTime": "2026-08-20T00:00:27.141Z",
+          "peakPrice": 85.34,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "ETHUSDC",
+          "side": "long",
+          "amount": 0.27432969251087225,
+          "buyPrice": 2251.72,
+          "entryPrice": 2251.72,
+          "currentPrice": 2490.23,
+          "investedUSDC": 618.64,
+          "marketValue": 683.14,
+          "unrealizedProfit": 64.5,
+          "unrealizedProfitPct": 10.43,
+          "buyTime": "2026-08-20T00:00:27.141Z",
+          "peakPrice": 2251.72,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "BTCUSDC",
+          "side": "long",
+          "amount": 0.008385225386776458,
+          "buyPrice": 73007.44,
+          "entryPrice": 73007.44,
+          "currentPrice": 78760.89,
+          "investedUSDC": 613.1,
+          "marketValue": 660.43,
+          "unrealizedProfit": 47.32,
+          "unrealizedProfitPct": 7.72,
+          "buyTime": "2026-08-21T00:00:26.687Z",
+          "peakPrice": 73007.44,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "LINKUSDC",
+          "side": "long",
+          "amount": 51.81346879828286,
+          "buyPrice": 10.551,
+          "entryPrice": 10.551,
+          "currentPrice": 11.611,
+          "investedUSDC": 547.5,
+          "marketValue": 601.61,
+          "unrealizedProfit": 54.1,
+          "unrealizedProfitPct": 9.88,
+          "buyTime": "2026-08-20T00:00:27.142Z",
+          "peakPrice": 10.551,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "LTCUSDC",
+          "side": "long",
+          "amount": 6.67097343143467,
+          "buyPrice": 53.16,
+          "entryPrice": 53.16,
+          "currentPrice": 49.72,
+          "investedUSDC": 355.16,
+          "marketValue": 331.68,
+          "unrealizedProfit": -23.48,
+          "unrealizedProfitPct": -6.61,
+          "buyTime": "2026-08-22T00:00:22.821Z",
+          "peakPrice": 53.16,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "XRPUSDC",
+          "side": "long",
+          "amount": 232.94579761735628,
+          "buyPrice": 1.2679,
+          "entryPrice": 1.2679,
+          "currentPrice": 1.4031,
+          "investedUSDC": 295.8,
+          "marketValue": 326.85,
+          "unrealizedProfit": 31.05,
+          "unrealizedProfitPct": 10.5,
+          "buyTime": "2026-08-21T00:00:26.688Z",
+          "peakPrice": 1.2679,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        }
+      ],
+      "trades": [],
+      "tradeStats": {
+        "totalTrades": 0,
+        "winningTrades": 0,
+        "losingTrades": 0,
+        "winRate": 0,
+        "grossProfit": 0,
+        "grossLoss": 0,
+        "profitFactor": null,
+        "avgWin": 0,
+        "avgLoss": 0,
+        "expectancy": 0,
+        "avgDurationHours": 0,
+        "byReason": {},
+        "bySymbol": {}
+      },
+      "equityCurve": [
+        {
+          "time": 1787184027141,
+          "equity": 5000
+        },
+        {
+          "time": 1787814475804,
+          "equity": 5314.58
+        }
+      ],
+      "drawdownCurve": [
+        {
+          "time": 1787184027141,
+          "drawdown": 0
+        },
+        {
+          "time": 1787814475804,
+          "drawdown": 0
+        }
+      ],
+      "maxDrawdown": 0
     },
-    {
-      "symbol": "BTCUSDC",
-      "buyPrice": 79904.29,
-      "sellPrice": 81465.36,
-      "amount": 0.008009582464220632,
-      "profit": 12.5,
-      "profitPct": 1.95,
-      "buyTime": "2026-05-14T13:30:15.601Z",
-      "sellTime": "2026-05-14T16:17:32.365Z",
-      "reason": "SIGNAL"
+    "ls": {
+      "id": "ls",
+      "title": "↕️ SMA150-LS (Long/Short)",
+      "storeKey": "bot_state_ls_v1",
+      "initialBalance": 5000,
+      "availableBalance": 3004.32,
+      "investedCost": 1572.82,
+      "currentMarketValue": 1775.5,
+      "currentTotalEquity": 4779.82,
+      "realizedProfit": -422.86,
+      "unrealizedProfit": 202.68,
+      "totalProfit": -220.18,
+      "roi": -4.4,
+      "circuitBreakerPausedUntil": "2026-08-28T00:30:12.302Z",
+      "lastRebalanceTime": null,
+      "openPositions": [
+        {
+          "symbol": "LINKUSDC",
+          "side": "long",
+          "amount": 58.29854606508773,
+          "buyPrice": 10.551,
+          "entryPrice": 10.551,
+          "currentPrice": 11.611,
+          "investedUSDC": 616.03,
+          "marketValue": 676.9,
+          "unrealizedProfit": 60.87,
+          "unrealizedProfitPct": 9.88,
+          "buyTime": "2026-08-20T00:00:27.793Z",
+          "peakPrice": 10.551,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "SOLUSDC",
+          "side": "long",
+          "amount": 6.201505171647948,
+          "buyPrice": 85.34,
+          "entryPrice": 85.34,
+          "currentPrice": 101.16,
+          "investedUSDC": 530.03,
+          "marketValue": 627.34,
+          "unrealizedProfit": 97.31,
+          "unrealizedProfitPct": 18.36,
+          "buyTime": "2026-08-20T00:15:07.303Z",
+          "peakPrice": 85.34,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "ETHUSDC",
+          "side": "long",
+          "amount": 0.1892436595163438,
+          "buyPrice": 2251.72,
+          "entryPrice": 2251.72,
+          "currentPrice": 2490.23,
+          "investedUSDC": 426.76,
+          "marketValue": 471.26,
+          "unrealizedProfit": 44.5,
+          "unrealizedProfitPct": 10.43,
+          "buyTime": "2026-08-20T00:15:07.303Z",
+          "peakPrice": 2251.72,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        }
+      ],
+      "trades": [
+        {
+          "symbol": "LINKUSDC",
+          "side": "short",
+          "buyPrice": 8.462,
+          "sellPrice": 8.879,
+          "amount": 48.4046324745923,
+          "profit": -23.96,
+          "profitPct": -5.85,
+          "buyTime": "2026-07-24T12:33:42.172Z",
+          "sellTime": "2026-08-14T00:00:40.381Z",
+          "reason": "SIGNAL"
+        },
+        {
+          "symbol": "BTCUSDC",
+          "side": "short",
+          "buyPrice": 65058.35,
+          "sellPrice": 69300.84,
+          "amount": 0.015370817120323526,
+          "profit": -76.25,
+          "profitPct": -7.63,
+          "buyTime": "2026-07-24T12:33:42.171Z",
+          "sellTime": "2026-08-20T00:00:27.791Z",
+          "reason": "TRAILING_STOP"
+        },
+        {
+          "symbol": "ETHUSDC",
+          "side": "short",
+          "buyPrice": 1877.28,
+          "sellPrice": 2251.72,
+          "amount": 0.42614847012699225,
+          "profit": -168.56,
+          "profitPct": -21.07,
+          "buyTime": "2026-07-24T12:33:42.171Z",
+          "sellTime": "2026-08-20T00:00:27.792Z",
+          "reason": "TRAILING_STOP"
+        },
+        {
+          "symbol": "SOLUSDC",
+          "side": "short",
+          "buyPrice": 75.82,
+          "sellPrice": 85.34,
+          "amount": 8.441044579266684,
+          "profit": -87.48,
+          "profitPct": -13.67,
+          "buyTime": "2026-07-24T12:33:42.171Z",
+          "sellTime": "2026-08-20T00:00:27.793Z",
+          "reason": "TRAILING_STOP"
+        },
+        {
+          "symbol": "XRPUSDC",
+          "side": "short",
+          "buyPrice": 1.1071,
+          "sellPrice": 1.1054,
+          "amount": 462.46951494896575,
+          "profit": -4.82,
+          "profitPct": -0.94,
+          "buyTime": "2026-07-24T12:33:42.172Z",
+          "sellTime": "2026-08-20T00:00:27.793Z",
+          "reason": "TRAILING_STOP"
+        },
+        {
+          "symbol": "AVAXUSDC",
+          "side": "short",
+          "buyPrice": 6.263,
+          "sellPrice": 7.289,
+          "amount": 49.101199537013805,
+          "profit": -53.91,
+          "profitPct": -17.53,
+          "buyTime": "2026-07-24T12:33:42.172Z",
+          "sellTime": "2026-08-21T00:00:27.221Z",
+          "reason": "TRAILING_STOP"
+        },
+        {
+          "symbol": "LTCUSDC",
+          "side": "short",
+          "buyPrice": 46.95,
+          "sellPrice": 47.81,
+          "amount": 5.669346910754771,
+          "profit": -7.88,
+          "profitPct": -2.96,
+          "buyTime": "2026-07-24T12:33:42.172Z",
+          "sellTime": "2026-08-21T00:00:27.221Z",
+          "reason": "TRAILING_STOP"
+        }
+      ],
+      "tradeStats": {
+        "totalTrades": 7,
+        "winningTrades": 0,
+        "losingTrades": 7,
+        "winRate": 0,
+        "grossProfit": 0,
+        "grossLoss": 422.86,
+        "profitFactor": 0,
+        "avgWin": 0,
+        "avgLoss": 60.41,
+        "expectancy": -60.41,
+        "avgDurationHours": 621.7,
+        "byReason": {
+          "SIGNAL": 1,
+          "TRAILING_STOP": 6
+        },
+        "bySymbol": {
+          "LINKUSDC": {
+            "trades": 1,
+            "profit": -23.96,
+            "wins": 0
+          },
+          "BTCUSDC": {
+            "trades": 1,
+            "profit": -76.25,
+            "wins": 0
+          },
+          "ETHUSDC": {
+            "trades": 1,
+            "profit": -168.56,
+            "wins": 0
+          },
+          "SOLUSDC": {
+            "trades": 1,
+            "profit": -87.48,
+            "wins": 0
+          },
+          "XRPUSDC": {
+            "trades": 1,
+            "profit": -4.82,
+            "wins": 0
+          },
+          "AVAXUSDC": {
+            "trades": 1,
+            "profit": -53.91,
+            "wins": 0
+          },
+          "LTCUSDC": {
+            "trades": 1,
+            "profit": -7.88,
+            "wins": 0
+          }
+        }
+      },
+      "equityCurve": [
+        {
+          "time": 1784896422171,
+          "equity": 5000
+        },
+        {
+          "time": 1786665640381,
+          "equity": 4976.04
+        },
+        {
+          "time": 1787184027791,
+          "equity": 4899.79
+        },
+        {
+          "time": 1787184027792,
+          "equity": 4731.23
+        },
+        {
+          "time": 1787184027793,
+          "equity": 4643.75
+        },
+        {
+          "time": 1787184027793,
+          "equity": 4638.93
+        },
+        {
+          "time": 1787270427221,
+          "equity": 4585.02
+        },
+        {
+          "time": 1787270427221,
+          "equity": 4577.14
+        },
+        {
+          "time": 1787814475804,
+          "equity": 4779.82
+        }
+      ],
+      "drawdownCurve": [
+        {
+          "time": 1784896422171,
+          "drawdown": 0
+        },
+        {
+          "time": 1786665640381,
+          "drawdown": 0.48
+        },
+        {
+          "time": 1787184027791,
+          "drawdown": 2
+        },
+        {
+          "time": 1787184027792,
+          "drawdown": 5.38
+        },
+        {
+          "time": 1787184027793,
+          "drawdown": 7.12
+        },
+        {
+          "time": 1787184027793,
+          "drawdown": 7.22
+        },
+        {
+          "time": 1787270427221,
+          "drawdown": 8.3
+        },
+        {
+          "time": 1787270427221,
+          "drawdown": 8.46
+        },
+        {
+          "time": 1787814475804,
+          "drawdown": 4.4
+        }
+      ],
+      "maxDrawdown": 8.46
     },
-    {
-      "symbol": "SOLUSDC",
-      "buyPrice": 91.32,
-      "sellPrice": 92.35,
-      "amount": 8.760402978537014,
-      "profit": 9.02,
-      "profitPct": 1.13,
-      "buyTime": "2026-05-14T06:30:45.484Z",
-      "sellTime": "2026-05-14T17:30:46.176Z",
-      "reason": "TRAILING_STOP"
-    },
-    {
-      "symbol": "SAGAUSDC",
-      "buyPrice": 0.02838,
-      "sellPrice": 0.02842,
-      "amount": 35661.72956940966,
-      "profit": 1.43,
-      "profitPct": 0.14,
-      "buyTime": "2026-05-14T20:15:43.367Z",
-      "sellTime": "2026-05-14T23:16:14.810Z",
-      "reason": "TRAILING_STOP"
+    "rotation": {
+      "id": "rotation",
+      "title": "🔄 ROT-dual-mom (Rotación)",
+      "storeKey": "bot_state_rotation_v1",
+      "initialBalance": 5000,
+      "availableBalance": 0,
+      "investedCost": 5000,
+      "currentMarketValue": 5710.12,
+      "currentTotalEquity": 5710.12,
+      "realizedProfit": 0,
+      "unrealizedProfit": 710.12,
+      "totalProfit": 710.12,
+      "roi": 14.2,
+      "circuitBreakerPausedUntil": null,
+      "lastRebalanceTime": "2026-08-20T00:00:00.000Z",
+      "openPositions": [
+        {
+          "symbol": "ENAUSDC",
+          "side": "long",
+          "amount": 8505.117117761392,
+          "buyPrice": 0.1174,
+          "entryPrice": 0.1174,
+          "currentPrice": 0.1509,
+          "investedUSDC": 1000,
+          "marketValue": 1283.42,
+          "unrealizedProfit": 283.42,
+          "unrealizedProfitPct": 28.34,
+          "buyTime": "2026-08-21T00:00:29.180Z",
+          "peakPrice": 0.1174,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "PUMPUSDC",
+          "side": "long",
+          "amount": 259350.84405849024,
+          "buyPrice": 0.00385,
+          "entryPrice": 0.00385,
+          "currentPrice": 0.00462,
+          "investedUSDC": 1000,
+          "marketValue": 1198.2,
+          "unrealizedProfit": 198.2,
+          "unrealizedProfitPct": 19.82,
+          "buyTime": "2026-08-21T00:00:29.180Z",
+          "peakPrice": 0.00385,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "LINKUSDC",
+          "side": "long",
+          "amount": 93.34399828224619,
+          "buyPrice": 10.697,
+          "entryPrice": 10.697,
+          "currentPrice": 11.611,
+          "investedUSDC": 1000,
+          "marketValue": 1083.82,
+          "unrealizedProfit": 83.82,
+          "unrealizedProfitPct": 8.38,
+          "buyTime": "2026-08-21T00:00:29.180Z",
+          "peakPrice": 10.697,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "BTCUSDC",
+          "side": "long",
+          "amount": 0.01366610934200282,
+          "buyPrice": 73064.01,
+          "entryPrice": 73064.01,
+          "currentPrice": 78760.89,
+          "investedUSDC": 1000,
+          "marketValue": 1076.35,
+          "unrealizedProfit": 76.35,
+          "unrealizedProfitPct": 7.64,
+          "buyTime": "2026-08-21T00:00:29.180Z",
+          "peakPrice": 73064.01,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        },
+        {
+          "symbol": "ETHUSDC",
+          "side": "long",
+          "amount": 0.42900692581437677,
+          "buyPrice": 2327.47,
+          "entryPrice": 2327.47,
+          "currentPrice": 2490.23,
+          "investedUSDC": 1000,
+          "marketValue": 1068.33,
+          "unrealizedProfit": 68.33,
+          "unrealizedProfitPct": 6.83,
+          "buyTime": "2026-08-21T00:00:29.180Z",
+          "peakPrice": 2327.47,
+          "trailingActivated": false,
+          "trailingStopPrice": null
+        }
+      ],
+      "trades": [],
+      "tradeStats": {
+        "totalTrades": 0,
+        "winningTrades": 0,
+        "losingTrades": 0,
+        "winRate": 0,
+        "grossProfit": 0,
+        "grossLoss": 0,
+        "profitFactor": null,
+        "avgWin": 0,
+        "avgLoss": 0,
+        "expectancy": 0,
+        "avgDurationHours": 0,
+        "byReason": {},
+        "bySymbol": {}
+      },
+      "equityCurve": [
+        {
+          "time": 1787270429180,
+          "equity": 5000
+        },
+        {
+          "time": 1787814475804,
+          "equity": 5710.12
+        }
+      ],
+      "drawdownCurve": [
+        {
+          "time": 1787270429180,
+          "drawdown": 0
+        },
+        {
+          "time": 1787814475804,
+          "drawdown": 0
+        }
+      ],
+      "maxDrawdown": 0
     }
-  ],
-  "openPositions": [],
-  "equityCurve": [
-    {
-      "time": 1778738690348,
-      "equity": 5000
-    },
-    {
-      "time": 1778774779981,
-      "equity": 5038.87
-    },
-    {
-      "time": 1778775452365,
-      "equity": 5051.37
-    },
-    {
-      "time": 1778779846176,
-      "equity": 5060.39
-    },
-    {
-      "time": 1778800574810,
-      "equity": 5061.82
-    },
-    {
-      "time": 1778868737847,
-      "equity": 5061.83
-    }
-  ],
-  "drawdownCurve": [
-    {
-      "time": 1778738690348,
-      "drawdown": 0
-    },
-    {
-      "time": 1778774779981,
-      "drawdown": 0
-    },
-    {
-      "time": 1778775452365,
-      "drawdown": 0
-    },
-    {
-      "time": 1778779846176,
-      "drawdown": 0
-    },
-    {
-      "time": 1778800574810,
-      "drawdown": 0
-    },
-    {
-      "time": 1778868737847,
-      "drawdown": 0
-    }
-  ]
+  }
 }

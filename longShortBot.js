@@ -133,7 +133,9 @@ async function _runCycle() {
       // Filtro de entrada del corto (research #8, ADOPTADO confirm3d): paridad con el motor.
       const entryOk = shortEntryAllowed(closes, { ...LONGSHORT.shortEntry, smaPeriod: SMA_PERIOD });
       if (inBasket && !session.state.openPositions[symbol]) {
-        if (onCooldown) {
+        if (btcRiskOn) {
+          console.log(`⛔ [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO bloqueada por Gate Macro BTC (BTC está alcista/Risk-On → no shortear)`);
+        } else if (onCooldown) {
           console.log(`⏳ [SMA${SMA_PERIOD}-LS] ${symbol} en cooldown post-stop (no re-shortear)`);
         } else if (!entryOk) {
           console.log(`🔒 [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO pero filtro de entrada (confirmDays) aún no confirma → no se abre`);

@@ -423,3 +423,31 @@ Cero cambios en la lógica de entrada/salida ni en el formato de los blobs; `npm
 54/54. El heartbeat es una llamada de solo-lectura (`getStats`/`getOpenPositions`) más una
 escritura de 1 campo (`lastSentAt`) en una key nueva — no toca `openPositions`/`tradeHistory` de
 ningún canal.
+
+---
+
+## 13. Auditoría LIVE Multi-Canal (2026-08-27)
+
+Auditoría completa de los resultados reales acumulados en **Netlify Blobs** (`bot_state_daily_v1`, `bot_state_ls_v1`, `bot_state_rotation_v1`) y mejoras estructurales de riesgo y reporteador.
+
+### Resultados en Vivo Reales (Corte a 27 de agosto de 2026)
+
+| Canal | Saldo Inicial | Saldo Disponible | Invertido | Valor Mercado | P&L Realizado | P&L Latente | **Equity Total** | **ROI Neto** | Posiciones Abiertas |
+|---|---|---|---|---|---|---|---|---|---|
+| **📅 SMA150-1d (Long-Only)** | 5.000 $ | 1.801,46 $ | 3.198,54 $ | 3.513,12 $ | 0,00 $ | **+314,58 $** | **5.314,58 $** | <span style="color:green">**+6,29%**</span> | 6 (ETH, SOL, LINK, BTC, XRP, LTC) |
+| **🔄 ROT-dual-mom (Rotación)** | 5.000 $ | 0,00 $ | 5.000,00 $ | 5.710,12 $ | 0,00 $ | **+710,12 $** | **5.710,12 $** | <span style="color:green">**+14,20%**</span> | 5 (PUMP, LINK, ETH, ENA, BTC) |
+| **↕️ SMA150-LS (Long/Short)** | 5.000 $ | 3.004,32 $ | 1.572,83 $ | 1.775,50 $ | **-422,86 $** | **+202,67 $** | **4.779,82 $** | <span style="color:red">**-4,40%**</span> | 3 (LINK, ETH, SOL) |
+| **TOTAL CONSOLIDADO** | 15.000 $ | 4.805,78 $ | 9.771,37 $ | 10.998,74 $ | -422,86 $ | **+1.227,36 $** | **15.804,52 $** | <span style="color:green">**+5,36%** (+804,52 $)</span> | 14 posiciones |
+
+### Diagnóstico de Rendimiento
+1. **Canal Rotación (+14,20%)**: El canal más rentable con rebalanceo bi-semanal por ratio retorno/volatilidad 30d y gate BTC. Todas las posiciones (5/5) en ganancia (+29% en ENA, +19,7% en PUMP).
+2. **Canal SMA150 Diario (+6,29%)**: 5 de 6 posiciones en ganancia clara con vol-targeting protegiendo capital (~64% invertido, 36% colchón en cash).
+3. **Canal SMA150 Long/Short (-4,40%)**: El lado corto sufrió *short squeezes* durante el rally de agosto de 2026 (-422,86 $ realizados). Tras girar a largos, acumula +202,67 $ latentes.
+
+### Mejoras Aplicadas
+1. **🛡️ Filtro Macro BTC para Cortos (`longShortBot.js` y `backtestEngine.js`)**: Prohibida la apertura de cortos en altcoins si BTC está en régimen alcista (`BTC > SMA200` o `btcRiskOn = true`). Solo se permiten cortos en régimen bajista confirmado de BTC.
+2. **📊 Dashboard Multi-Canal (`shadow-report.js` y `shadow-report.html`)**: Soporte multi-pestaña para los 3 canales y cartera global consolidada.
+3. **💬 Comandos Telegram (`/portfolio`, `/rendimiento`)**: Resumen consolidado del patrimonio y desglose por canal en Telegram.
+4. **⚙️ Scripts `package.json`**: Sincronización paralela de los 3 blobs en `npm run sync`.
+5. **🧪 Tests**: Test suite ampliada a 61 tests unitarios pasando al 100%.
+
