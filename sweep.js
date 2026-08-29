@@ -15,7 +15,7 @@
 import fs from 'fs';
 import BacktestEngine from './backtestEngine.js';
 import { deflatedSharpe, probabilityOfBacktestOverfitting, variance } from './validation.js';
-import { BLACKLIST, STRATEGY_OPTS, RISK, COSTS } from './config.js';
+import { isBlacklisted, BLACKLIST, STRATEGY_OPTS, RISK, COSTS } from './config.js';
 
 // Performance por bloque temporal (suma de retornos log de la equity) para PBO/CSCV.
 function chunkPerformance(equityCurve, S) {
@@ -40,7 +40,7 @@ const MONTHS = monthsArg ? parseInt(monthsArg.split('=')[1]) : 12;
 let SYMBOLS = symbolsArg
   ? symbolsArg.split('=')[1].split(',')
   : ['BTCUSDC', 'ETHUSDC', 'SOLUSDC', 'XRPUSDC', 'LINKUSDC', 'AVAXUSDC', 'DOTUSDC', 'LTCUSDC'];
-SYMBOLS = SYMBOLS.filter(s => !BLACKLIST.some(b => s.includes(b)));
+SYMBOLS = SYMBOLS.filter(s => !isBlacklisted(s));
 
 const TIMEFRAMES = ['15m', '1h'];
 

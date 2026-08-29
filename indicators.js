@@ -928,6 +928,14 @@ export function periodsPerYearFor(interval = '1d') {
  * @returns {number} peso en [0, wMax]
  */
 export function computeVolTargetWeight(closes, opts = {}) {
+  // ⚠️ Auditoría 2026-08-29 (A5): esta función IGNORABA `opts.enabled`. `config.js` declaraba
+  // `VOLTARGET.enabled = false` mientras dailyBot y longShortBot la llamaban incondicionalmente
+  // → el vol-targeting estaba VIVO en los dos canales diarios y la config decía lo contrario.
+  // Ahora se honra el flag y el default de config se ha puesto en `true`, que es la verdad
+  // (y lo que `wfcore.lsBaseEngineOpts` ya forzaba para el backtest → paridad preservada).
+  // enabled:false ⇒ peso wMax ⇒ sizing fijo por `RISK.positionSizePct`, sin escalar.
+  const wMaxOff = opts.wMax ?? 1.0;
+  if (opts.enabled === false) return wMaxOff;
   const targetVolAnnual = opts.targetVolAnnual ?? 0.5;
   const lambda = opts.lambda ?? 0.94;
   const wMax = opts.wMax ?? 1.0;
@@ -1095,4 +1103,31 @@ export function computeRotationTargets(closesBySymbol, opts = {}) {
     if (absMom != null && absMom > 0) targets.push(r.symbol);
   }
   return { targets, ranked, riskOff: false };
+}
+
+/**
+ * ¿Es la última vela CERRADA lo bastante reciente como para entrar a su precio de cierre?
+ *
+ * El canal diario ejecuta al cierre de la última vela cerrada — igual que el motor de backtest.
+ * Si el cron dispara muchas horas más tarde (jitter del scheduler, recuperación de un fallo,
+ * arranque en frío tras un deploy), ese precio ya no es el precio al que se puede operar, y el
+ * backtest sobreestima el fill. Auditoría 2026-08-29 (H8): sesgo medido +0,25 %..+0,73 % del
+ * nocional, contra un presupuesto TOTAL de costes del 0,30 %.
+ *
+ * Pura y fail-open: sin datos utilizables devuelve true (nunca bloquea por no saber).
+ *
+ * @param {Array<{closeTime:number}>} rawKlines  velas TAL CUAL las devuelve binanceService
+ *   (incluida la vela EN FORMACIÓN al final, que es la que da el cierre de la anterior)
+ * @param {number} maxHours  antigüedad máxima admitida desde el cierre
+ * @param {number} now
+ */
+export function entriesAreFresh(rawKlines, maxHours = 6, now = Date.now()) {
+  if (!Array.isArray(rawKlines) || rawKlines.length < 2) return true; // fail-open
+  // La última vela está EN FORMACIÓN; la última CERRADA es la penúltima.
+  const lastClosed = rawKlines[rawKlines.length - 2];
+  const closeTime = Number(lastClosed && lastClosed.closeTime);
+  if (!Number.isFinite(closeTime)) return true; // fail-open
+  const ageHours = (now - closeTime) / 3600000;
+  if (!Number.isFinite(ageHours) || ageHours < 0) return true; // reloj raro → no bloquear
+  return ageHours <= maxHours;
 }

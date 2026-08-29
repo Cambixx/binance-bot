@@ -1,0 +1,121 @@
+{
+  "months": 42,
+  "folds": 8,
+  "symbols": [
+    "BTCUSDC",
+    "ETHUSDC",
+    "SOLUSDC",
+    "XRPUSDC",
+    "LINKUSDC",
+    "AVAXUSDC",
+    "DOTUSDC",
+    "LTCUSDC",
+    "BNBUSDC",
+    "ATOMUSDC",
+    "UNIUSDC",
+    "FILUSDC",
+    "AAVEUSDC",
+    "ETCUSDC",
+    "NEARUSDC",
+    "APTUSDC"
+  ],
+  "dailyRiskOff": true,
+  "rows": [
+    {
+      "fold": 2,
+      "from": "2023-08-23",
+      "to": "2024-01-27",
+      "trades": 0,
+      "roi": 0,
+      "pf": 0,
+      "sharpe": 0,
+      "calmar": 0,
+      "maxDD": 0,
+      "hodlRoi": 8.68
+    },
+    {
+      "fold": 3,
+      "from": "2024-01-27",
+      "to": "2024-07-03",
+      "trades": 16,
+      "roi": 12.13,
+      "pf": 1.62,
+      "sharpe": 0.51,
+      "calmar": 1.21,
+      "maxDD": 25.1,
+      "hodlRoi": -1.28
+    },
+    {
+      "fold": 4,
+      "from": "2024-07-03",
+      "to": "2024-12-07",
+      "trades": 18,
+      "roi": 81.03,
+      "pf": 6.4,
+      "sharpe": 2.84,
+      "calmar": 10,
+      "maxDD": 25.95,
+      "hodlRoi": 102.51
+    },
+    {
+      "fold": 5,
+      "from": "2024-12-07",
+      "to": "2025-05-13",
+      "trades": 19,
+      "roi": -15.57,
+      "pf": 2.11,
+      "sharpe": -0.69,
+      "calmar": -0.95,
+      "maxDD": 35.28,
+      "hodlRoi": -34.6
+    },
+    {
+      "fold": 6,
+      "from": "2025-05-13",
+      "to": "2025-10-18",
+      "trades": 24,
+      "roi": 12.9,
+      "pf": 1.87,
+      "sharpe": 0.51,
+      "calmar": 1.5,
+      "maxDD": 27.06,
+      "hodlRoi": -10.28
+    },
+    {
+      "fold": 7,
+      "from": "2025-10-18",
+      "to": "2026-03-24",
+      "trades": 1,
+      "roi": -0.75,
+      "pf": 0,
+      "sharpe": -1.38,
+      "calmar": -1.76,
+      "maxDD": 0.98,
+      "hodlRoi": -45.02
+    },
+    {
+      "fold": 8,
+      "from": "2026-03-24",
+      "to": "2026-08-29",
+      "trades": 5,
+      "roi": -4.03,
+      "pf": 0.29,
+      "sharpe": -1,
+      "calmar": -1.86,
+      "maxDD": 4.87,
+      "hodlRoi": -3.48
+    }
+  ],
+  "summary": {
+    "valid": 7,
+    "withTrades": 6,
+    "flatFolds": 1,
+    "medianROI": 0,
+    "medianSharpe": 0,
+    "medianCalmar": 0,
+    "iqrCalmar": 2.97,
+    "worstCalmar": -1.86,
+    "foldsPosRoi": 3,
+    "foldsPfOk": 5
+  }
+}

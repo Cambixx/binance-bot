@@ -13,8 +13,27 @@ export const BLACKLIST = [
   'TAO', 'ZEC', 'PEPE', 'ADA', 'INJ', 'DOGE', 'BCH'
 ];
 
+// Quotes que Binance usa en los pares que este bot mira. Se recortan del símbolo para quedarnos
+// con el ACTIVO BASE antes de comparar contra la blacklist.
+const QUOTE_SUFFIXES = /(USDC|USDT|FDUSD|BUSD|TUSD|USD1|EUR|GBP|BTC|ETH|BNB)$/;
+
+/**
+ * ¿Está el ACTIVO BASE del par en la blacklist?
+ *
+ * ⚠️ Auditoría 2026-08-29: antes esto era `BLACKLIST.some(bad => symbol.includes(bad))`, una
+ * comparación por SUBSTRING sin anclar. Como la blacklist contiene stablecoins ('TUSD', 'BUSD'),
+ * colisionaba con activos legítimos cuyo TICKER las contiene al pegarles el quote:
+ *   'DOTUSDC'.includes('TUSD')  → true   ← DOT llevaba MESES sin operarse en vivo
+ *   'BNBUSDC'.includes('BUSD')  → true
+ *   'APTUSDC'.includes('TUSD')  → true
+ *   'ARBUSDC'/'SHIBUSDC' .includes('BUSD') → true
+ * Efecto: DAILY_BASKET declaraba 8 símbolos y el live operaba 7, divergiendo del backtest. Esto
+ * explica además la anomalía "DOTUSDC nunca se ha shorteado" que la auditoría §12 dejó abierta:
+ * DOT nunca entraba en el bucle `monitored`, así que su logging de diagnóstico no podía disparar.
+ */
 export function isBlacklisted(symbol) {
-  return BLACKLIST.some(bad => symbol.includes(bad));
+  const base = String(symbol).replace(QUOTE_SUFFIXES, '');
+  return BLACKLIST.includes(base);
 }
 
 // ─────────────────────────── Estrategia ───────────────────────────
@@ -50,6 +69,22 @@ export const RISK = {
   maxConcurrentPositions: null, // nº máximo de posiciones abiertas simultáneas
   maxExposurePct: null,         // fracción máxima del equity invertida a la vez (0..1)
 };
+
+// ─────────────────────────── Base de dimensionamiento ───────────────────────────
+// Sobre QUÉ se aplica `positionSizePct` al abrir:
+//   'cash'   → sobre la CAJA REMANENTE (comportamiento histórico).
+//   'equity' → sobre caja + coste de las abiertas (invariante dentro del ciclo).
+//
+// ⚠️ Auditoría 2026-08-29 (H1): con base 'cash' la exposición acumulada es exactamente
+// 1 − 0,8^n, así que las asignaciones caen en ESCALERA GEOMÉTRICA y el ORDEN del array de
+// símbolos se convierte en un parámetro no declarado: el 24-jul-2026 el primer símbolo recibió
+// 3,76× el capital del último (1.000 vs 266 USDC) por su índice en DAILY_BASKET, no por
+// convicción ni por riesgo. Y el cap `maxExposurePct = 0.85` resulta INALCANZABLE: hace falta
+// n ≥ 9 posiciones para cruzarlo y la cesta tiene 8. Con base 'equity' la exposición es n·20 %
+// (lineal), todas las posiciones pesan igual y el cap vuelve a morder.
+// `rotationBot.js` YA usa esta base ('equity / topN'); es el patrón correcto que faltaba en los
+// otros dos canales. Se cambia solo si pasa el gate pareado.
+export const SIZING_BASIS = 'cash';
 
 // ─────────────────────────── Banda de histéresis (familia diaria) ───────────────────────────
 // Evita whipsaw en torno a la SMA (auditoría #11 / mejora 2026-07-24): solo entra si close > sma*(1+band)
@@ -107,7 +142,10 @@ export const LONGSHORT = {
 // Banda de no-trade (τ) para no re-balancear por ruido y gastar costes. enabled=false preserva
 // el sizing fijo histórico (positionSizePct); se activa por canal.
 export const VOLTARGET = {
-  enabled: false,
+  // ⚠️ Auditoría 2026-08-29 (A5): esto decía `false` mientras el vol-targeting SÍ se aplicaba en
+  // dailyBot y longShortBot (computeVolTargetWeight ignoraba el flag). Se pone en `true`, que es
+  // el comportamiento REAL y el que el backtest ya forzaba — no cambia nada, deja de mentir.
+  enabled: true,
   targetVolAnnual: 0.50,  // ~50% anualizado por sleeve de una sola moneda
   lambda: 0.94,           // decaimiento EWMA (estándar RiskMetrics diario)
   wMax: 1.0,              // spot long-only: sin apalancamiento
@@ -144,6 +182,14 @@ export const ROTATION = {
   useBtcRegime: true,      // exigir BTC risk-on para mantener cualquier posición
   useRiskAdjusted: true,   // ranking por retorno/volatilidad 30d (Sharpe-ratio) en vez de retorno bruto
 };
+
+// ─────────────────────────── Frescura de la vela para ENTRAR ───────────────────────────
+// El canal diario ejecuta al CIERRE de la última vela cerrada, igual que el backtest. Si el cron
+// dispara muchas horas después de ese cierre (jitter, recuperación de un fallo, cold start), el
+// precio de referencia está rancio y el fill real diverge del simulado — medido en la auditoría
+// 2026-08-29: +0,45 % de sesgo ponderado, sobre un presupuesto TOTAL de costes del 0,30 %.
+// Solo veta APERTURAS: las salidas se gestionan siempre (nunca se atrapa una posición).
+export const ENTRY_FRESHNESS_HOURS = 6;
 
 // ─────────────────────────── Circuit Breaker de Cartera ───────────────────────────
 // Pausa la apertura de nuevas posiciones si el Max Drawdown de la cartera supera el 12%.

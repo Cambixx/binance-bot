@@ -1,8 +1,8 @@
 import binance from './binanceService.js';
-import { longShortTrader, isCircuitBreakerActive } from './shadowTrader.js';
+import { longShortTrader, isCircuitBreakerPaused, updateCircuitBreaker, computePortfolioEquity } from './shadowTrader.js';
 import telegramService from './telegramService.js';
-import { evaluateStrategySMA200, computeVolTargetWeight, shortEntryAllowed, calculateATR, btcRegimeOn } from './indicators.js';
-import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT, REGIME } from './config.js';
+import { evaluateStrategySMA200, computeVolTargetWeight, shortEntryAllowed, calculateATR, btcRegimeOn, entriesAreFresh } from './indicators.js';
+import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT, REGIME, ENTRY_FRESHNESS_HOURS } from './config.js';
 
 /**
  * CANAL LONG/SHORT — SMA150 "always-in-the-market" (reconvierte el hueco del parado V4C-15m).
@@ -24,11 +24,6 @@ async function _runCycle() {
   console.log(`\n↕️ [SMA${SMA_PERIOD}-LS] Iniciando canal long/short (always-in)...`);
   const session = await longShortTrader.beginSession();
   console.log(`📊 [SMA${SMA_PERIOD}-LS] Saldo Virtual: ${session.state.balanceUSDC.toFixed(2)} USDC`);
-
-  const cbActive = isCircuitBreakerActive(session.state);
-  if (cbActive) {
-    console.log(`⛔ [SMA${SMA_PERIOD}-LS] Circuit Breaker activo → pausa temporizada por Max Drawdown rolling (no se abren posiciones nuevas).`);
-  }
 
   const symbols = DAILY_BASKET.filter(s => !isBlacklisted(s));
   const openSymbols = Object.keys(session.state.openPositions);
@@ -58,6 +53,28 @@ async function _runCycle() {
     const btcCloses = (btcRaw.length > 0 ? btcRaw.slice(0, -1) : btcRaw).map(k => k.close);
     btcRiskOn = btcRegimeOn(btcCloses, REGIME.btcSmaPeriod, REGIME);
     if (!btcRiskOn) console.log(`⛔ [SMA${SMA_PERIOD}-LS] Gate BTC: BTC risk-off (SMA${REGIME.btcSmaPeriod} o Crash Guard) → no se abren largos nuevos este ciclo.`);
+  }
+
+  // Circuit breaker por DRAWDOWN REAL (auditoría 2026-08-29). Tras la descarga, porque necesita
+  // el equity A MERCADO, y UNA sola vez por ciclo (muta pico y pausa). Solo veta APERTURAS.
+  const marketPrices = {};
+  for (const s of monitored) {
+    const raw = rawBySymbol[s] || [];
+    const k = raw.length > 0 ? raw.slice(0, -1) : raw;
+    if (k.length) marketPrices[s] = k[k.length - 1].close;
+  }
+  const cb = updateCircuitBreaker(session.state, computePortfolioEquity(session.state, marketPrices));
+  if (cb.active) {
+    console.log(`⛔ [SMA${SMA_PERIOD}-LS] Circuit Breaker ACTIVO (${cb.reason}) — DD ${cb.drawdownPct.toFixed(2)}% sobre pico ${cb.peak.toFixed(2)} → no se abren posiciones nuevas.`);
+  } else if (cb.reason === 'histeresis') {
+    console.log(`🟡 [SMA${SMA_PERIOD}-LS] Circuit Breaker en histéresis: pausa cumplida con DD ${cb.drawdownPct.toFixed(2)}% aún alto → se permite operar, no se re-arma.`);
+  }
+
+  // Guarda de FRESCURA (H8): no abrir al cierre de una vela rancia. Las salidas NO se tocan.
+  const freshRef = rawBySymbol[REGIME.btcSymbol] || rawBySymbol[monitored[0]] || [];
+  const fresh = entriesAreFresh(freshRef, ENTRY_FRESHNESS_HOURS);
+  if (!fresh) {
+    console.log(`🕒 [SMA${SMA_PERIOD}-LS] Vela rancia (>${ENTRY_FRESHNESS_HOURS}h desde el cierre) → no se abren posiciones nuevas (las salidas SÍ se gestionan).`);
   }
 
 
@@ -116,8 +133,10 @@ async function _runCycle() {
           // Ya logueado una vez por ciclo a nivel de gate global (evita repetirlo por símbolo).
         } else if (frac <= 0) {
           console.log(`⚪ [SMA${SMA_PERIOD}-LS] ${symbol} señal LARGO pero vol-target → peso 0 (no se abre)`);
+        } else if (!fresh) {
+          console.log(`🕒 [SMA${SMA_PERIOD}-LS] ${symbol} señal LARGO no se abre: vela rancia`);
         } else if (!canOpenLive(session.state)) {
-          console.log(`🚫 [SMA${SMA_PERIOD}-LS] ${symbol} señal LARGO bloqueada por cap de exposición/posiciones (maxExposurePct/maxConcurrentPositions)`);
+          console.log(`🚫 [SMA${SMA_PERIOD}-LS] ${symbol} señal LARGO bloqueada por circuit breaker o cap de exposición/posiciones`);
         } else {
           console.log(`🟢 [SMA${SMA_PERIOD}-LS] LARGO ${symbol} a ${price} (size ${(frac * 100).toFixed(0)}%)`);
           longShortTrader.applyBuy(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
@@ -141,8 +160,10 @@ async function _runCycle() {
           console.log(`🔒 [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO pero filtro de entrada (confirmDays) aún no confirma → no se abre`);
         } else if (shortFrac <= 0) {
           console.log(`⚪ [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO pero vol-target → peso 0 (no se abre)`);
+        } else if (!fresh) {
+          console.log(`🕒 [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO no se abre: vela rancia`);
         } else if (!canOpenLive(session.state)) {
-          console.log(`🚫 [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO bloqueada por cap de exposición/posiciones (maxExposurePct/maxConcurrentPositions)`);
+          console.log(`🚫 [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO bloqueada por circuit breaker o cap de exposición/posiciones`);
         } else {
           console.log(`🟠 [SMA${SMA_PERIOD}-LS] CORTO ${symbol} a ${price} (size ${(shortFrac * 100).toFixed(0)}%)`);
           longShortTrader.applyShort(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: shortFrac });
@@ -158,7 +179,7 @@ async function _runCycle() {
 // Cap de exposición en LIVE (auditoría #4): porta la guarda que el motor ya aplica, para que el
 // backtest y el live respeten los mismos límites. Valora a coste (sin llamadas extra a la API).
 function canOpenLive(state) {
-  if (isCircuitBreakerActive(state)) return false;
+  if (isCircuitBreakerPaused(state)) return false;
   const open = state.openPositions;
   const count = Object.keys(open).length;
   if (LONGSHORT.maxConcurrentPositions != null && count >= LONGSHORT.maxConcurrentPositions) return false;

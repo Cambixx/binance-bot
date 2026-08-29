@@ -2,7 +2,7 @@ import fs from 'fs';
 import BacktestEngine, { strategyName } from './backtestEngine.js';
 import binance from './binanceService.js';
 import { exec } from 'child_process';
-import { BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT } from './config.js';
+import { isBlacklisted, BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT } from './config.js';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -58,7 +58,9 @@ async function main() {
   // así que aplicarlo al pasado mete sesgo de supervivencia/selección → backtest optimista.
   // Para auditar el sesgo, opta explícitamente con --universe=N (queda etiquetado abajo).
   const DEFAULT_BASKET = ['BTCUSDC', 'ETHUSDC', 'SOLUSDC', 'XRPUSDC', 'LINKUSDC', 'AVAXUSDC', 'DOTUSDC', 'LTCUSDC'];
-  let symbols = DEFAULT_BASKET;
+  // Mismo filtro que el live (H6): antes esta ruta NO aplicaba la blacklist mientras walkforward
+  // y abtest sí, así que los tres arneses podían correr universos distintos entre sí.
+  let symbols = DEFAULT_BASKET.filter(s => !isBlacklisted(s));
   let universeNote = 'cesta fija large-caps (sin sesgo de supervivencia)';
 
   if (symbolsArg) {
@@ -70,7 +72,7 @@ async function main() {
       console.log(`🔍 Top ${universeSize} por volumen (⚠️ top dinámico = sesgo de supervivencia en backtest)...`);
       const topSymbols = await binance.getTopVolumeSymbols(universeSize + 5);
       if (topSymbols && topSymbols.length > 0) {
-        symbols = topSymbols.filter(s => !BLACKLIST.some(bad => s.includes(bad))).slice(0, universeSize);
+        symbols = topSymbols.filter(s => !isBlacklisted(s)).slice(0, universeSize);
         universeNote = `⚠️ top-${universeSize} dinámico de HOY (sesgo de supervivencia)`;
       }
     } catch (e) {

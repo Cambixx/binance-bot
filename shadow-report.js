@@ -21,7 +21,11 @@ const CHANNELS_CONFIG = {
   },
   rotation: {
     id: 'rotation',
-    title: '🔄 ROT-dual-mom (Rotación)',
+    // ⚠️ La etiqueta EXPERIMENTAL existía en botStatus.js y en la documentación, pero se perdía
+    // justo en la capa que el usuario mira. El canal aportó el 88 % del beneficio reportado y su
+    // primer backtest honesto (2026-08-29) da holdout PF 0,83 / ROI −23,49 %.
+    title: '🔄 ROT-dual-mom (Rotación) · EXPERIMENTAL',
+    experimental: true,
     storeKey: 'bot_state_rotation_v1',
     syncFile: 'sync_rotation.json',
     initialBalance: 5000
@@ -129,7 +133,11 @@ function normalizeTrades(tradeHistory) {
 function buildTradeStats(trades) {
   const totalTrades = trades.length;
   const winners = trades.filter((trade) => trade.profit > 0);
-  const losers = trades.filter((trade) => trade.profit <= 0);
+  // Convención alineada con el motor (fix #27): perdedoras profit<0; los breakeven (profit==0)
+  // van a su propio bucket y NO se cuentan como pérdidas. Aquí decía `<= 0`, que inflaba
+  // grossLoss y hundía el profit factor con cada cierre exactamente plano.
+  const losers = trades.filter((trade) => trade.profit < 0);
+  const breakeven = trades.filter((trade) => trade.profit === 0);
   const winRate = totalTrades > 0 ? (winners.length / totalTrades) * 100 : 0;
 
   const grossProfit = winners.reduce((sum, trade) => sum + trade.profit, 0);
@@ -141,6 +149,25 @@ function buildTradeStats(trades) {
     : 0;
 
   const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : null;
+
+  // ── Cifras de decisión (auditoría 2026-08-29) ────────────────────────────────────────────
+  // El win rate SOLO no dice nada: al lado va siempre el mínimo necesario para no perder dinero
+  // dado el payoff, y el margen entre ambos. En este bot el libro corto tiene WR ALTA (40,7 %) y
+  // margen de +1,6 pp, y el largo WR BAJA (23,3 %) y margen de +14 pp.
+  const payoff = avgLoss > 0 ? avgWin / avgLoss : null;
+  const breakevenWR = payoff != null ? (1 / (1 + payoff)) * 100 : null;
+  // N EFECTIVO: fechas de entrada distintas. 7 cortos abiertos el mismo día sobre activos con
+  // ρ̄≈0,73 son ~1 apuesta, no 7 — y con ~1 observación no se puede concluir nada del win rate.
+  const nEffective = new Set(trades.map((t) => String(t.buyTime || '').slice(0, 10))).size;
+  // Intervalo de Wilson: con n pequeño es el único honesto. Wilson(0/7) = [0 % ; 35,4 %].
+  const wilson = (() => {
+    if (!(totalTrades > 0)) return null;
+    const z = 1.96, pHat = winners.length / totalTrades;
+    const d = 1 + (z * z) / totalTrades;
+    const c = pHat + (z * z) / (2 * totalTrades);
+    const h = z * Math.sqrt((pHat * (1 - pHat)) / totalTrades + (z * z) / (4 * totalTrades * totalTrades));
+    return { low: round(Math.max(0, (c - h) / d) * 100), high: round(Math.min(1, (c + h) / d) * 100) };
+  })();
   const totalDuration = trades.reduce((sum, trade) => {
     const buyTime = parseDate(trade.buyTime);
     const sellTime = parseDate(trade.sellTime);
@@ -171,7 +198,13 @@ function buildTradeStats(trades) {
     totalTrades,
     winningTrades: winners.length,
     losingTrades: losers.length,
+    breakevenTrades: breakeven.length,
     winRate: round(winRate),
+    payoff: payoff === null ? null : round(payoff),
+    breakevenWR: breakevenWR === null ? null : round(breakevenWR),
+    marginPP: breakevenWR === null ? null : round(winRate - breakevenWR),
+    nEffective,
+    wilson95: wilson,
     grossProfit: round(grossProfit),
     grossLoss: round(grossLoss),
     profitFactor: profitFactor === null ? null : round(profitFactor),
@@ -424,6 +457,16 @@ async function main() {
     // 4. Procesar cartera consolidada
     const portfolio = processPortfolio(channels, generatedAt);
 
+    // Consolidado SIN los canales experimentales. El titular +5,36 % venía en un 88 % del canal
+    // de rotación, que no tenía validación ninguna: sin él, el bot está en +0,94 %. Reportar solo
+    // la cifra agregada oculta de dónde sale el resultado.
+    const validated = Object.fromEntries(
+      Object.entries(channels).filter(([key]) => !CHANNELS_CONFIG[key] || !CHANNELS_CONFIG[key].experimental)
+    );
+    const portfolioValidated = Object.keys(validated).length > 0
+      ? processPortfolio(validated, generatedAt)
+      : null;
+
     const reportData = {
       summary: {
         reportType: 'Multi-Channel Shadow Mode',
@@ -439,9 +482,13 @@ async function main() {
         roi: portfolio.roi,
         totalTrades: portfolio.tradeStats.totalTrades,
         openPositionsCount: portfolio.openPositions.length,
-        maxDrawdown: portfolio.maxDrawdown
+        maxDrawdown: portfolio.maxDrawdown,
+        // Cifra honesta al lado del titular: qué queda al excluir lo no validado.
+        roiExcludingExperimental: portfolioValidated ? portfolioValidated.roi : null,
+        experimentalChannels: Object.entries(CHANNELS_CONFIG).filter(([, c]) => c.experimental).map(([k]) => k),
       },
       portfolio,
+      portfolioValidated,
       channels
     };
 

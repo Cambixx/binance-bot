@@ -1,6 +1,6 @@
 import { getStore } from '@netlify/blobs';
 import telegramService from './telegramService.js';
-import { RISK, COSTS, INITIAL_BALANCE, PORTFOLIO_CIRCUIT_BREAKER } from './config.js';
+import { RISK, COSTS, INITIAL_BALANCE, PORTFOLIO_CIRCUIT_BREAKER, SIZING_BASIS } from './config.js';
 
 
 /**
@@ -208,7 +208,10 @@ class ShadowTrader {
     }
 
     const sizeFraction = Number(options.sizeFraction ?? RISK.positionSizePct);
-    const investAmountUSDC = state.balanceUSDC * sizeFraction;
+    // Base de dimensionamiento (H1): 'equity' hace que el reparto no dependa del orden del array.
+    const sizeBase = (options.sizeBasis ?? SIZING_BASIS) === 'equity'
+      ? portfolioEquityAtCost(state) : state.balanceUSDC;
+    const investAmountUSDC = Math.min(sizeBase * sizeFraction, state.balanceUSDC);
     if (!(investAmountUSDC > 0) || !(price > 0)) return false;
 
     // Costes de entrada (paridad backtest): slippage en el precio + fee sobre el notional.
@@ -270,7 +273,9 @@ class ShadowTrader {
       return false;
     }
     const sizeFraction = Number(options.sizeFraction ?? RISK.positionSizePct);
-    const marginUSDC = state.balanceUSDC * sizeFraction;
+    const sizeBase = (options.sizeBasis ?? SIZING_BASIS) === 'equity'
+      ? portfolioEquityAtCost(state) : state.balanceUSDC;
+    const marginUSDC = Math.min(sizeBase * sizeFraction, state.balanceUSDC);
     if (!(marginUSDC > 0) || !(price > 0)) return false;
 
     state.balanceUSDC -= marginUSDC;
@@ -433,25 +438,118 @@ export const longShortTrader = new ShadowTrader({ storeKey: 'bot_state_ls_v1', l
 export { ShadowTrader };
 
 /**
- * Comprueba si el Circuit Breaker de cartera está activo (pausa por Max Drawdown rolling).
+ * Equity de cartera VALORADA A COSTE (caja + margen/coste de las abiertas). Es el fallback
+ * cuando el caller no tiene precios a mano; `computePortfolioEquity` es la versión a mercado.
  */
-export function isCircuitBreakerActive(state) {
+export function portfolioEquityAtCost(state) {
+  let invested = 0;
+  const open = (state && state.openPositions) || {};
+  for (const s in open) invested += Number(open[s].investedUSDC) || 0;
+  return (Number(state && state.balanceUSDC) || 0) + invested;
+}
+
+/**
+ * Equity de cartera VALORADA A MERCADO con los precios que el caller ya tiene descargados.
+ * Simétrica con `getStats`: el corto aporta margen + P&L flotante − funding DEVENGADO.
+ */
+export function computePortfolioEquity(state, prices = {}, now = Date.now()) {
+  let invested = 0;
+  const open = (state && state.openPositions) || {};
+  for (const s in open) {
+    const pos = open[s];
+    const mkt = prices[s];
+    const px = (mkt && mkt > 0) ? mkt : pos.buyPrice;
+    if (pos.side === 'short') {
+      const entry = pos.entryPrice ?? pos.buyPrice;
+      const daysHeld = Math.max(0, (now - new Date(pos.timestamp).getTime()) / 86400000);
+      const funding = (Number(pos.investedUSDC) || 0) * (COSTS.fundingDailyShort || 0) * daysHeld;
+      invested += (Number(pos.investedUSDC) || 0) + pos.amount * (entry - px) - funding;
+    } else {
+      invested += pos.amount * px;
+    }
+  }
+  return (Number(state && state.balanceUSDC) || 0) + invested;
+}
+
+/**
+ * PREDICADO PURO: ¿hay una pausa del circuit breaker vigente ahora mismo? No muta nada.
+ * Es lo que deben consultar los guards de apertura (`canOpenLive`).
+ */
+export function isCircuitBreakerPaused(state, now = Date.now()) {
   if (!PORTFOLIO_CIRCUIT_BREAKER || !PORTFOLIO_CIRCUIT_BREAKER.enabled) return false;
-  if (state && state.circuitBreakerPausedUntil) {
-    if (Date.now() < new Date(state.circuitBreakerPausedUntil).getTime()) return true;
+  const until = state && state.circuitBreakerPausedUntil;
+  if (!until) return false;
+  const t = new Date(until).getTime();
+  return Number.isFinite(t) && now < t;
+}
+
+/**
+ * Circuit breaker de cartera por MAX DRAWDOWN real. Muta el estado (pico + pausa) → llamar
+ * UNA sola vez por ciclo, antes del bucle de símbolos.
+ *
+ * ⚠️ Auditoría 2026-08-29 — la versión anterior NO medía drawdown. Hacía:
+ *      totalLoss = Σ|pérdidas| de los ≤8 últimos cierres     // nunca neteaba las GANANCIAS
+ *      equity    = state.balanceUSDC                          // CAJA, no equity
+ *      dispara si totalLoss / (equity + totalLoss) ≥ 12 %
+ *    Cuatro defectos, todos reproducidos sobre el estado live:
+ *    1. Denominador = caja ⇒ el signo del control estaba INVERTIDO: cuanto más capital
+ *       desplegaba el canal, más cerca estaba de "cortar por drawdown" con el equity intacto.
+ *       Estado real del canal LS: 12,34 % (disparaba) vs 8,46 % de DD real sobre equity.
+ *    2. Sin ventana temporal y sin netear ganancias ⇒ PAUSABA CANALES GANADORES: el historial
+ *       +500·4 / −200·4 (P&L neto +1.200, drawdown CERO) devolvía true con caja 5.000.
+ *    3. El guard `equity > 0` lo dejaba INERTE con caja 0 — justo el canal ROT, 100 % invertido.
+ *    4. Un predicado llamado `is...Active` MUTABA el estado, y se le llamaba 2× por ciclo.
+ *
+ * Ahora: pico de equity persistido + DD = (pico − equity)/pico, con HISTÉRESIS para que una
+ * pausa expirada no se re-arme en bucle indefinido (el canal LS quedaba trabado: al no poder
+ * abrir, no generaba cierres nuevos que sacaran las pérdidas de la ventana).
+ *
+ * @param {object} state      estado de la sesión (se muta: equityPeak / pausa)
+ * @param {number} equityNow  equity a mercado; si no es finito, cae a valoración a coste
+ * @returns {{active:boolean, drawdownPct:number, equity:number, peak:number, reason:string}}
+ */
+export function updateCircuitBreaker(state, equityNow = NaN, now = Date.now()) {
+  const cb = PORTFOLIO_CIRCUIT_BREAKER;
+  if (!cb || !cb.enabled) return { active: false, drawdownPct: 0, equity: 0, peak: 0, reason: 'disabled' };
+
+  const equity = Number.isFinite(equityNow) && equityNow > 0 ? equityNow : portfolioEquityAtCost(state);
+  if (!(equity > 0)) {
+    // Sin equity valorable no se puede medir DD: NO se arma nada (fail-open, como el gate BTC).
+    return { active: isCircuitBreakerPaused(state, now), drawdownPct: 0, equity: 0, peak: Number(state.equityPeak) || 0, reason: 'sin-equity' };
   }
-  const history = (state && state.tradeHistory) || [];
-  if (history.length < 4) return false;
-  const recent = history.slice(-8);
-  let totalLoss = 0;
-  for (const t of recent) {
-    if (t.profitUSDC < 0) totalLoss += Math.abs(t.profitUSDC);
+
+  // Semilla del pico: si el estado no lo trae (canal preexistente al fix, o recién reseteado),
+  // se ancla al CAPITAL INICIAL. Si arrancara en el equity actual, un canal que ya viene caído
+  // reportaría DD 0 % y el breaker nacería ciego a la caída que ya lleva encima.
+  const peak = Math.max(Number(state.equityPeak) || INITIAL_BALANCE || 0, equity);
+  state.equityPeak = peak;
+  const drawdownPct = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
+
+  // 1) Pausa vigente → activo, sin recomputar ni extender.
+  if (isCircuitBreakerPaused(state, now)) {
+    return { active: true, drawdownPct, equity, peak, reason: 'pausa-vigente' };
   }
-  const equity = state.balanceUSDC || 0;
-  if (equity > 0 && (totalLoss / (equity + totalLoss)) * 100 >= PORTFOLIO_CIRCUIT_BREAKER.maxDrawdownPct) {
-    state.circuitBreakerPausedUntil = new Date(Date.now() + PORTFOLIO_CIRCUIT_BREAKER.pauseHours * 3600000).toISOString();
-    return true;
+
+  // 2) Pausa EXPIRADA → histéresis. No se re-arma hasta que el DD baje del 80 % del umbral.
+  //    Sin esto, el mismo drawdown re-arma otras `pauseHours` cada vez que expira, y como la
+  //    pausa impide abrir, el canal nunca puede recuperarse por sí mismo → bloqueo permanente.
+  if (state.circuitBreakerPausedUntil) {
+    if (drawdownPct < cb.maxDrawdownPct * 0.8) {
+      state.circuitBreakerPausedUntil = null;   // recuperado: el breaker vuelve a estar armado
+      state.circuitBreakerCooling = false;
+    } else {
+      state.circuitBreakerCooling = true;       // sigue hundido, pero ya cumplió su pausa
+      return { active: false, drawdownPct, equity, peak, reason: 'histeresis' };
+    }
   }
-  return false;
+
+  // 3) Armado normal.
+  if (drawdownPct >= cb.maxDrawdownPct) {
+    state.circuitBreakerPausedUntil = new Date(now + cb.pauseHours * 3600000).toISOString();
+    state.circuitBreakerCooling = false;
+    return { active: true, drawdownPct, equity, peak, reason: 'armado' };
+  }
+
+  return { active: false, drawdownPct, equity, peak, reason: 'ok' };
 }
 

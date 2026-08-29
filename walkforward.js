@@ -14,7 +14,7 @@
 import fs from 'fs';
 import BacktestEngine, { strategyName } from './backtestEngine.js';
 import binance from './binanceService.js';
-import { BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT } from './config.js';
+import { isBlacklisted, BLACKLIST, STRATEGY_OPTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT } from './config.js';
 
 const args = process.argv.slice(2);
 const getNum = (p, d) => { const a = args.find(x => x.startsWith(p)); return a ? parseFloat(a.split('=')[1]) : d; };
@@ -35,7 +35,7 @@ const exitMode = isDaily ? 'signal' : (strategyVersion === '4A' || strategyVersi
 let SYMBOLS = getStr('--symbols=', '')
   ? getStr('--symbols=', '').split(',')
   : ['BTCUSDC', 'ETHUSDC', 'SOLUSDC', 'XRPUSDC', 'LINKUSDC', 'AVAXUSDC', 'DOTUSDC', 'LTCUSDC'];
-SYMBOLS = SYMBOLS.filter(s => !BLACKLIST.some(b => s.includes(b)));
+SYMBOLS = SYMBOLS.filter(s => !isBlacklisted(s));
 
 function buildRegimeOpts() {
   const ro = { ...STRATEGY_OPTS };

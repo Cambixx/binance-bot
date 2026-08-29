@@ -9,13 +9,14 @@ import {
 } from './indicators.js';
 import { evaluateFixedExit } from './exits.js';
 import binance, { cumRateAt } from './binanceService.js';
-import { BLACKLIST, RISK, COSTS, LOOKBACK_15M, LONGSHORT, REGIME } from './config.js';
+import { BLACKLIST, isBlacklisted, RISK, COSTS, LOOKBACK_15M, LONGSHORT, REGIME, SIZING_BASIS, PORTFOLIO_CIRCUIT_BREAKER } from './config.js';
 
 const BINANCE_API_BASE = 'https://data-api.binance.vision/api/v3';
 
 // Mapa único de nombres de estrategia (fix auditoría #25: antes había dos mapas locales
 // desincronizados y generateReport etiquetaba TODO como "V3").
 export const STRATEGY_NAMES = {
+  ROTATION: 'Rotación cross-sectional + dual-momentum (ROT)',
   1: 'V1 (Original)', 2: 'V2 (Optimizada)', 3: 'V3 (ADX+Trailing)',
   '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)',
   '5': 'V5 (Trend-rider)', '6': 'V6 (Adaptive SuperTrend)',
@@ -94,6 +95,28 @@ class BacktestEngine {
       : (REGIME.btcEnabled ? { smaPeriod: REGIME.btcSmaPeriod } : null);
 
     // Exit mode: 'fixed' = TP/SL/trailing% clásicos | 'atr' = Chandelier (ATR-based) + ATR SL
+    // donchianLongGate (research 2026-08-29): exigir que el cierre marque MÁXIMO de n días para
+    // abrir LARGO, ADEMÁS de la señal SMA. Es la ÚNICA candidata del research que sube el win
+    // rate de verdad (réplica: 26,3 % → 45,5 %, esperanza/trade 7,36 % → 15,32 %, meseta en
+    // 60/90/150) — a costa de ~37 % del P&L total. { lookbackDays: 90 }.
+    // ⚠️ SOLO LARGOS: en la réplica la pata corta empeora monótonamente (42,9/38,8/35,9 %) con
+    // el P&L hundiéndose un 70 %. No aplicar al corto bajo ningún concepto.
+    this.donchianLongGate = options.donchianLongGate ?? null;
+
+    // Base de dimensionamiento (H1): 'cash' (histórico) | 'equity' (order-independent).
+    this.sizeBasis = options.sizeBasis ?? SIZING_BASIS;
+
+    // Circuit breaker de cartera (auditoría 2026-08-29 H2): existía SOLO en el live, así que
+    // ningún backtest publicado describía la estrategia que realmente corre. Se porta aquí para
+    // paridad; `portfolioCircuitBreaker: null` lo desactiva (y así se puede medir su efecto).
+    this.circuitBreaker = options.portfolioCircuitBreaker !== undefined
+      ? options.portfolioCircuitBreaker
+      : (PORTFOLIO_CIRCUIT_BREAKER && PORTFOLIO_CIRCUIT_BREAKER.enabled ? { ...PORTFOLIO_CIRCUIT_BREAKER } : null);
+    this.cbPeak = 0;
+    this.cbPausedUntil = 0;
+    this.cbCooling = false;
+    this.cbTriggers = 0;
+
     this.exitMode = options.exitMode || 'fixed';
     this.atrPeriod = options.atrPeriod || 14;
     this.atrSLMult = options.atrSLMult || 2.0;        // SL = entry - 2×ATR
@@ -141,11 +164,15 @@ class BacktestEngine {
     this.lastEventTime = 0; // máximo timestamp de vela visto (para cierres END_OF_BACKTEST)
   }
 
+  // Fuente ÚNICA del filtro de universo: `config.isBlacklisted` (auditoría 2026-08-29 H6).
+  // Antes el motor tenía su PROPIA copia con la misma comparación por substring sin anclar,
+  // así que el fix en config.js no habría llegado hasta aquí y backtest y live seguirían
+  // corriendo universos distintos por otra vía.
   filterSymbols(symbols) {
     return symbols.filter(symbol => {
-      const isBlacklisted = BLACKLIST.some(badCoin => symbol.includes(badCoin));
-      if (isBlacklisted) console.log(`🚫 ${symbol} eliminado por Blacklist`);
-      return !isBlacklisted;
+      const bad = isBlacklisted(symbol);
+      if (bad) console.log(`🚫 ${symbol} eliminado por Blacklist`);
+      return !bad;
     });
   }
 
@@ -357,7 +384,7 @@ class BacktestEngine {
         if (signal === 'BUY') {
           if (pos && pos.side === 'short') this.executeShortClose(symbol, close, time, 'SIGNAL');
           const cur = this.state.openPositions[symbol];
-          if (!cur && this.canOpenPosition(currentPrices) && this.longEntryAllowed()) {
+          if (!cur && this.canOpenPosition(currentPrices) && this.longEntryAllowed() && this.donchianLongAllowed(buf)) {
             this.executeBuy(symbol, close, time, null, buf);
           } else if (cur && cur.side === 'long') {
             this.tryPyramidAdd(symbol, close, buf, currentPrices); // candidata pyramid (no-op si off)
@@ -374,7 +401,7 @@ class BacktestEngine {
       }
 
       // Lógica de Compra (con caps de cartera, fix #26)
-      if (signal === 'BUY' && !hasPosition && !isOnCooldown && this.canOpenPosition(currentPrices) && this.longEntryAllowed()) {
+      if (signal === 'BUY' && !hasPosition && !isOnCooldown && this.canOpenPosition(currentPrices) && this.longEntryAllowed() && this.donchianLongAllowed(buf)) {
         // Si modo ATR, anclar SL/peak iniciales con ATR del momento
         const entryATR = this.exitMode === 'atr'
           ? this.getCurrentATR(buf)
@@ -474,6 +501,24 @@ class BacktestEngine {
     return btcRegimeOn(c, smaPeriod, { ...REGIME, ...this.btcGateLong });
   }
 
+  /**
+   * Gate Donchian de horizonte lento para LARGOS: el cierre debe ser el MÁXIMO de los últimos n
+   * días (evaluación CONTINUA, no solo el día del cruce de la SMA — la versión "solo en el cruce"
+   * deja pasar 13 de 251 entradas con n=90 y es inaplicable).
+   * Fail-open si el buffer no alcanza (mismo criterio que el resto de gates).
+   */
+  donchianLongAllowed(buf) {
+    if (!this.donchianLongGate || !buf) return true;
+    const n = this.donchianLongGate.lookbackDays ?? 90;
+    const closes = buf.closes;
+    if (!closes || closes.length < n + 1) return true; // fail-open
+    const window = closes.slice(closes.length - n - 1, closes.length - 1); // n cierres ANTERIORES
+    const last = closes[closes.length - 1];
+    let max = -Infinity;
+    for (const v of window) if (v > max) max = v;
+    return last >= max;
+  }
+
   // Multiplicador de fuerza de tendencia al abrir (candidata entryTilt, Carver-lite):
   // z = |ln(close/SMA)| en unidades de σ del horizonte; clamp [floor, 1]. Side-agnóstico.
   entryTiltMult(buf) {
@@ -502,7 +547,7 @@ class BacktestEngine {
     if (!(price >= anchor * (1 + step))) return;
     if (!this.canOpenPosition(currentPrices, true)) return;
     const sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf);
-    const investAmount = this.state.balance * sizeFrac;
+    const investAmount = Math.min(this.sizingBase() * sizeFrac, this.state.balance);
     if (!(investAmount > 0)) return;
     const fillPrice = price * (1 + this.slippagePct);
     const buyFee = investAmount * this.feePct;
@@ -518,6 +563,7 @@ class BacktestEngine {
   // auditoría 2026-07-03 #5). Exposición SIDE-AWARE: un corto compromete su MARGEN (invested),
   // no el nocional a mercado (antes un rally agregado bloqueaba aperturas de más).
   canOpenPosition(currentPrices, isAdd = false) {
+    if (this.cbPausedUntil > 0) return false;   // pausa vigente del circuit breaker
     const maxPos = this.maxConcurrentPositions ?? (this.longShort ? LONGSHORT.maxConcurrentPositions : null);
     const maxExp = this.maxExposurePct ?? (this.longShort ? LONGSHORT.maxExposurePct : null);
     const openCount = Object.keys(this.state.openPositions).length;
@@ -534,10 +580,20 @@ class BacktestEngine {
     return true;
   }
 
+  // Base sobre la que se aplica la fracción de tamaño. 'equity' = caja + coste de las abiertas:
+  // invariante dentro de la misma barra, así que el reparto NO depende del orden de los símbolos.
+  sizingBase() {
+    if (this.sizeBasis !== 'equity') return this.state.balance;
+    let invested = 0;
+    for (const s in this.state.openPositions) invested += this.state.openPositions[s].invested || 0;
+    return this.state.balance + invested;
+  }
+
   executeBuy(symbol, price, time, entryATR = null, buf = null) {
     const sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf);
     if (sizeFrac <= 0) return; // vol-targeting devolvió peso 0 (régimen demasiado volátil)
-    const investAmount = this.state.balance * sizeFrac;
+    const investAmount = Math.min(this.sizingBase() * sizeFrac, this.state.balance);
+    if (!(investAmount > 0)) return;
 
     // Costes de entrada: slippage (peor precio de compra) + comisión sobre el notional.
     // amountCrypto se reduce por ambos → el coste queda baked-in en el P&L y la equity.
@@ -614,7 +670,8 @@ class BacktestEngine {
   executeShortOpen(symbol, price, time, buf = null) {
     const sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf) * (this.shortRiskFraction ?? 1) * this.shortRiskMultiplier(symbol, time);
     if (sizeFrac <= 0) return;
-    const invested = this.state.balance * sizeFrac; // margen reservado
+    const invested = Math.min(this.sizingBase() * sizeFrac, this.state.balance); // margen reservado
+    if (!(invested > 0)) return;
     const amount = invested / price;
     this.state.balance -= invested;
     this.state.openPositions[symbol] = {
@@ -647,6 +704,7 @@ class BacktestEngine {
     this.state.tradeHistory.push({
       symbol, side: 'short', buyPrice: entry, sellPrice: price,
       profit: parseFloat(profit.toFixed(2)), profitPct: parseFloat(profitPct.toFixed(2)),
+      invested: parseFloat(pos.invested.toFixed(2)),
       buyTime: pos.time, sellTime: new Date(time).toISOString(), reason, phase,
     });
     delete this.state.openPositions[symbol];
@@ -701,9 +759,10 @@ class BacktestEngine {
         const partialPct = (partialProfit / halfInvested) * 100;
         this.state.balance += returnAmount;
         this.state.tradeHistory.push({
-          symbol, buyPrice: pos.buyPrice, sellPrice: close,
+          symbol, side: pos.side || 'long', buyPrice: pos.buyPrice, sellPrice: close,
           profit: parseFloat(partialProfit.toFixed(2)),
           profitPct: parseFloat(partialPct.toFixed(2)),
+          invested: parseFloat(halfInvested.toFixed(2)),
           buyTime: pos.time, sellTime: new Date(time).toISOString(),
           reason: 'PARTIAL_TP',
           // Fase por sellTime (fix #7/#20): el P&L se realiza al CIERRE, así la métrica por
@@ -713,8 +772,10 @@ class BacktestEngine {
         pos.amount -= halfAmount;
         pos.invested -= halfInvested;
         pos.partialTaken = true;
-        // tras parcial: mover SL a breakeven
-        pos.atrSL = pos.buyPrice;
+        // ⚠️ Auditoría 2026-08-29: AQUÍ se movía el SL a breakeven (`pos.atrSL = pos.buyPrice`).
+        // Combinado con el truncamiento del parcial es la variante MÁS dañina posible: corta la
+        // cola derecha y además convierte en breakeven cualquier retroceso normal del trend.
+        // El trailing/Chandelier sigue gestionando la salida del resto de la posición.
       }
     }
 
@@ -752,6 +813,7 @@ class BacktestEngine {
       sellPrice: price,
       profit: parseFloat(profit.toFixed(2)),
       profitPct: parseFloat(profitPct.toFixed(2)),
+      invested: parseFloat(pos.invested.toFixed(2)),
       buyTime: pos.time,
       sellTime: new Date(time).toISOString(),
       reason,
@@ -859,8 +921,37 @@ class BacktestEngine {
   // MaxDrawdown a RESOLUCIÓN COMPLETA: se llama en CADA vela (fix #1). Mantiene un peak/maxDD
   // por fase, independiente del equityCurve submuestreado (que es solo para el plot). Así el
   // DD reportado y el de computeBuyHold se miden con la misma granularidad por-vela.
+  /**
+   * Circuit breaker de cartera SIMULADO (paridad con `shadowTrader.updateCircuitBreaker`).
+   * Mismo contrato: DD real sobre el pico de equity, pausa temporizada e histéresis al 80 %
+   * del umbral para que una pausa expirada no se re-arme en bucle. Solo veta APERTURAS.
+   */
+  updateCircuitBreakerSim(time, equity) {
+    const cb = this.circuitBreaker;
+    if (!cb || !(equity > 0)) return;
+    if (this.cbPeak <= 0) this.cbPeak = Math.max(this.initialBalance, equity);
+    if (equity > this.cbPeak) this.cbPeak = equity;
+    const dd = ((this.cbPeak - equity) / this.cbPeak) * 100;
+
+    if (this.cbPausedUntil > 0) {
+      if (time < this.cbPausedUntil) return;      // pausa vigente
+      // Pausa cumplida → histéresis: no re-armar hasta recuperar por debajo del 80 % del umbral.
+      if (dd < cb.maxDrawdownPct * 0.8) { this.cbPausedUntil = 0; this.cbCooling = false; }
+      else { this.cbPausedUntil = 0; this.cbCooling = true; return; }
+    }
+    if (this.cbCooling) {
+      if (dd < cb.maxDrawdownPct * 0.8) this.cbCooling = false;
+      return;
+    }
+    if (dd >= cb.maxDrawdownPct) {
+      this.cbPausedUntil = time + cb.pauseHours * 3600000;
+      this.cbTriggers++;
+    }
+  }
+
   trackDrawdown(time, currentPrices) {
     const eq = this.currentEquity(currentPrices, time);
+    this.updateCircuitBreakerSim(time, eq);
     const update = (acc) => {
       if (eq > acc.peak) acc.peak = eq;
       if (acc.peak > 0) {
@@ -917,7 +1008,12 @@ class BacktestEngine {
     };
   }
 
-  computeMetrics(trades, balanceStart, balanceEnd, equityCurveSubset, precomputedMaxDD = null) {
+  computeMetrics(executions, balanceStart, balanceEnd, equityCurveSubset, precomputedMaxDD = null, opts = {}) {
+    // ⚠️ Auditoría 2026-08-29 (A1): las métricas se calculan sobre POSICIONES, no sobre
+    // ejecuciones. Una posición cerrada en tramos (`PARTIAL_TP` + cierre final) es UN resultado.
+    // Contar los parciales por separado inflaba el win rate ~20 pp sin mejorar la esperanza,
+    // porque el parcial solo dispara en ganancia (ganador por construcción).
+    const trades = aggregateByPosition(executions);
     const totalTrades = trades.length;
     // Convención de clasificación (fix #27): ganadoras profit>0, perdedoras profit<0,
     // breakeven profit==0 en su propio bucket (no infla las pérdidas).
@@ -989,7 +1085,37 @@ class BacktestEngine {
 
     const risk = this.computeRiskAdjusted(equityCurveSubset, maxDD);
 
+    // ── Panel por LIBRO (A2): la win rate sola engaña; al lado va SIEMPRE la de breakeven ──
+    const mkBooks = (list) => ({
+      global: bookMetrics(list),
+      long: bookMetrics(list.filter(t => (t.side || 'long') !== 'short')),
+      short: bookMetrics(list.filter(t => t.side === 'short')),
+    });
+    const books = mkBooks(trades);
+    // Y la versión HONESTA: sin los cierres administrativos de fin de ventana, que en
+    // trend-following concentran los ganadores (marcan a mercado lo que seguía abierto).
+    const booksSignalOnly = mkBooks(trades.filter(t => t.reason !== 'END_OF_BACKTEST'));
+
+    // ── Purga del holdout (H4): métricas contando SOLO posiciones ENTRADAS en la ventana ──
+    // El etiquetado de fase es por sellTime (fix #7/#20, correcto para atribuir P&L al tramo de
+    // equity). Pero eso hace que el holdout herede posiciones abiertas en train: sobre
+    // backtest-results.json el PF del holdout pasa de 3,66 a 2,46 al purgarlas, y el 80 % de esa
+    // diferencia es UN solo trade de XRPUSDC. Se reporta AL LADO, no en sustitución.
+    let entryInWindow = null;
+    if (opts.windowStart != null) {
+      const own = trades.filter(t => new Date(t.buyTime).getTime() >= opts.windowStart);
+      entryInWindow = bookMetrics(own);
+      entryInWindow.inheritedFromPreviousWindow = trades.length - own.length;
+    }
+
+    // ── Contrafactual de truncamiento (A4): guardarraíl contra "subir el win rate" ──
+    const truncation = [20, 30, 50, 100].map(c => truncationCounterfactual(trades, c));
+
     return {
+      books,
+      booksSignalOnly,
+      entryInWindow,
+      truncation,
       totalTrades,
       winningTrades: winners.length,
       losingTrades: losers.length,
@@ -1050,7 +1176,8 @@ class BacktestEngine {
         trainTrades, this.initialBalance, balanceAtSplit, trainCurve, this.ddTrack.train.maxDD
       );
       holdoutMetrics = this.computeMetrics(
-        holdoutTrades, balanceAtSplit, this.state.balance, holdoutCurve, this.ddTrack.holdout.maxDD
+        holdoutTrades, balanceAtSplit, this.state.balance, holdoutCurve, this.ddTrack.holdout.maxDD,
+        { windowStart: this.splitTime }
       );
       trainMetrics.splitTime = splitIso;
       holdoutMetrics.splitTime = splitIso;
@@ -1067,6 +1194,8 @@ class BacktestEngine {
         symbols: this.symbols,
         strategy: strategyName(this.strategyVersion),
         strategyVersion: this.strategyVersion,
+        circuitBreakerTriggers: this.circuitBreaker ? this.cbTriggers : null,
+        sizeBasis: this.sizeBasis,
         oosSplitRatio: this.oosSplitRatio,
         costs: {
           feePct: this.feePct,
@@ -1091,3 +1220,148 @@ class BacktestEngine {
 }
 
 export default BacktestEngine;
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// Contabilidad honesta de resultados (auditoría 2026-08-29)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Agrega EJECUCIONES en POSICIONES. Una posición puede cerrarse en varios tramos (`PARTIAL_TP`
+ * + cierre final); contarlos como trades independientes falsea el win rate.
+ *
+ * ⚠️ Por qué importa: `partialExitAtR` solo dispara EN GANANCIA (`close >= buyPrice + N·R`), así
+ * que cada parcial es un ganador POR CONSTRUCCIÓN que entraba en el numerador y el denominador.
+ * Medido: con 50 parciales el win rate salta de 35,35 % a 47,55 % sin que la esperanza mejore un
+ * euro — de hecho empeora, porque el parcial trunca la cola derecha, que es donde vive el
+ * beneficio (avgWin 114,33 vs avgLoss 39,50). Era un interruptor para falsificar la métrica.
+ *
+ * La posición se identifica por `symbol + buyTime`. El resultado hereda el motivo del ÚLTIMO
+ * cierre (el que de verdad liquidó la posición) y el P&L es la suma de los tramos.
+ */
+export function aggregateByPosition(trades) {
+  const byKey = new Map();
+  for (const t of trades || []) {
+    const key = `${t.symbol}|${t.buyTime}`;
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, { ...t, executions: 1, partials: t.reason === 'PARTIAL_TP' ? 1 : 0 });
+      continue;
+    }
+    prev.profit = parseFloat((prev.profit + t.profit).toFixed(2));
+    prev.invested = parseFloat(((prev.invested || 0) + (t.invested || 0)).toFixed(2));
+    prev.executions += 1;
+    if (t.reason === 'PARTIAL_TP') prev.partials += 1;
+    // El cierre más tardío define motivo, precio y fase de la posición. Si algún sellTime no es
+    // una fecha parseable, se cae al ORDEN de llegada (el último gana) en vez de comparar NaN,
+    // que siempre da false y dejaría el motivo del PRIMER tramo (típicamente el PARTIAL_TP).
+    const tNew = new Date(t.sellTime).getTime();
+    const tPrev = new Date(prev.sellTime).getTime();
+    const isLater = (Number.isFinite(tNew) && Number.isFinite(tPrev)) ? (tNew >= tPrev) : true;
+    if (isLater) {
+      prev.sellTime = t.sellTime;
+      prev.sellPrice = t.sellPrice;
+      prev.reason = t.reason;
+      prev.phase = t.phase;
+    }
+  }
+  const out = [];
+  for (const pos of byKey.values()) {
+    pos.profitPct = pos.invested > 0 ? parseFloat(((pos.profit / pos.invested) * 100).toFixed(2)) : pos.profitPct;
+    out.push(pos);
+  }
+  return out.sort((a, b) => new Date(a.sellTime) - new Date(b.sellTime));
+}
+
+/**
+ * Intervalo de confianza de Wilson para una proporción. Con n pequeño es MUY superior al
+ * intervalo normal (que puede salirse de [0,1] y no cubre el caso 0 aciertos).
+ * Wilson(0/7) = [0 % ; 35,4 %] — contiene el 35,35 % del backtest, y por eso una racha de
+ * 0/7 no contradice al modelo.
+ */
+export function wilsonInterval(wins, n, z = 1.96) {
+  if (!(n > 0)) return { low: null, high: null };
+  const p = wins / n;
+  const d = 1 + (z * z) / n;
+  const centre = p + (z * z) / (2 * n);
+  const half = z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+  return {
+    low: parseFloat((Math.max(0, (centre - half) / d) * 100).toFixed(2)),
+    high: parseFloat((Math.min(1, (centre + half) / d) * 100).toFixed(2)),
+  };
+}
+
+/**
+ * Métricas de decisión de un LIBRO (global / largo / corto), sobre POSICIONES ya agregadas.
+ *
+ * La cifra clave no es el win rate: es el win rate de BREAKEVEN — el mínimo necesario para no
+ * perder dinero dado el payoff — y el MARGEN entre ambos. En este bot el libro corto tiene win
+ * rate ALTA (40,74 %) y margen ridículo (+1,6 pp), y el largo win rate BAJA (23,29 %) y margen
+ * cómodo (+14,0 pp): la win rate por sí sola apunta al revés que el dinero.
+ *
+ * `nEffective` cuenta FECHAS DE ENTRADA distintas, no trades: 7 cortos abiertos el mismo día
+ * sobre activos con ρ̄=0,73 son ~1 apuesta, no 7.
+ */
+export function bookMetrics(positions) {
+  const n = positions.length;
+  if (n === 0) return { trades: 0 };
+  const winners = positions.filter(t => t.profit > 0);
+  const losers = positions.filter(t => t.profit < 0);
+  const gp = winners.reduce((s, t) => s + t.profit, 0);
+  const gl = Math.abs(losers.reduce((s, t) => s + t.profit, 0));
+  const avgWin = winners.length ? gp / winners.length : 0;
+  const avgLoss = losers.length ? gl / losers.length : 0;
+  const payoff = avgLoss > 0 ? avgWin / avgLoss : null;
+  // WR de breakeven = 1/(1+payoff): por debajo de esto el libro pierde dinero por construcción.
+  const breakevenWR = payoff != null ? (1 / (1 + payoff)) * 100 : null;
+  const winRate = (winners.length / n) * 100;
+  const entryDays = new Set(positions.map(t => String(t.buyTime).slice(0, 10)));
+  const sorted = positions.slice().sort((a, b) => b.profit - a.profit);
+  const net = positions.reduce((s, t) => s + t.profit, 0);
+  const topSum = (k) => sorted.slice(0, k).reduce((s, t) => s + t.profit, 0);
+  const r2 = (v) => v == null ? null : parseFloat(v.toFixed(2));
+  return {
+    trades: n,
+    winners: winners.length,
+    losers: losers.length,
+    winRate: r2(winRate),
+    avgWin: r2(avgWin),
+    avgLoss: r2(avgLoss),
+    payoff: r2(payoff),
+    breakevenWR: r2(breakevenWR),
+    marginPP: breakevenWR != null ? r2(winRate - breakevenWR) : null,
+    profitFactor: gl > 0 ? r2(gp / gl) : (gp > 0 ? null : 0), // null = ∞
+    netProfit: r2(net),
+    expectancy: r2(net / n),
+    nEffective: entryDays.size,
+    wilson95: wilsonInterval(winners.length, n),
+    // Concentración: si el top-5 supera el 100 % del neto, el resultado depende de un puñado
+    // de trades y la media no describe nada.
+    top5PctOfNet: net !== 0 ? r2((topSum(5) / net) * 100) : null,
+    top10PctOfNet: net !== 0 ? r2((topSum(10) / net) * 100) : null,
+  };
+}
+
+/**
+ * Contrafactual de TRUNCAMIENTO: ¿qué habría pasado con un take-profit al `capPct` %?
+ *
+ * Cota SUPERIOR optimista: solo trunca los trades que YA superaban el umbral, y asume que se
+ * habrían cerrado exactamente ahí (ignora que muchos perdedores habrían tocado el objetivo
+ * antes de girarse). Aun así, sobre los 208 cierres reales: base +2.702 → TP20 % **−1.102**.
+ *
+ * Es el guardarraíl contra la tentación de "subir el win rate": toda propuesta que toque
+ * salidas pasa por aquí ANTES de gastar un walk-forward.
+ */
+export function truncationCounterfactual(positions, capPct) {
+  let net = 0, truncated = 0;
+  for (const t of positions) {
+    const invested = t.invested || 0;
+    const pct = invested > 0 ? (t.profit / invested) * 100 : (t.profitPct || 0);
+    if (pct > capPct) {
+      net += invested > 0 ? invested * (capPct / 100) : t.profit * (capPct / pct);
+      truncated++;
+    } else {
+      net += t.profit;
+    }
+  }
+  return { capPct, netProfit: parseFloat(net.toFixed(2)), truncatedTrades: truncated };
+}

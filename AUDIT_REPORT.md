@@ -451,3 +451,152 @@ Auditoría completa de los resultados reales acumulados en **Netlify Blobs** (`b
 4. **⚙️ Scripts `package.json`**: Sincronización paralela de los 3 blobs en `npm run sync`.
 5. **🧪 Tests**: Test suite ampliada a 61 tests unitarios pasando al 100%.
 
+
+---
+
+## 14. Auditoría + research 2026-08-29 — correcciones aplicadas y torneos pre-registrados
+
+Dos workflows multi-agente (21 + 24 agentes) con verificación adversarial de cada hallazgo y
+fact-checking de cada fuente: **36 hallazgos candidatos → 13 confirmados**; **27 propuestas de
+research → 2 sólidas**. Todos los hallazgos de severidad alta se re-verificaron ejecutando el
+código y recomputando la matemática. Suite: **75 tests en verde** (era 61).
+
+### 14.1 Defectos corregidos
+
+| # | Defecto | Fix | Verificación |
+|---|---|---|---|
+| **H6** | `isBlacklisted` comparaba por SUBSTRING sin anclar: `'DOTUSDC'.includes('TUSD')` → **DOT llevaba meses sin operarse**; también BNB/APT/ARB/SHIB. La cesta declaraba 8 símbolos y el live operaba 7. | Comparación anclada al **activo base** (`config.js`). Eliminadas las **6 copias duplicadas** del filtro (motor, backtest, walkforward, abtest, sweep, validate) → fuente única. | `DAILY_BASKET` operado 8/8. Backtest regenerado: DOTUSDC aporta 19 trades / +166,42 USDC. **Cierra la anomalía que §12 dejó abierta**: DOT nunca entraba en `monitored`, por eso su logging de diagnóstico no podía disparar. |
+| **H2** | El circuit breaker **no medía drawdown**: Σ\|pérdidas\| de los ≤8 últimos cierres dividido por la **CAJA**. Nunca neteaba ganancias, sin ventana temporal, inerte con caja 0, y un predicado `is...Active` **mutaba** el estado. | Reescrito: pico de equity persistido, DD real `(pico−equity)/pico`, **histéresis** al 80 % del umbral, predicado puro separado de la mutación, y **portado al motor** (no existía en backtest). | Sobre el estado live: antes 12,34 % → disparaba; ahora **DD real 4,40 % → el canal LS queda desbloqueado**. Regresiones cubiertas: canal ganador (+1.200, DD 0) ya no se pausa; caja 0 ya no lo desactiva; no hay bucle de re-armado. |
+| **A1** | `--partial-r` insertaba cada cierre parcial como trade propio y `computeMetrics` lo contaba. Como el parcial **solo dispara en ganancia**, era un interruptor para **falsificar el win rate**. | Métricas por **POSICIÓN** (`aggregateByPosition`). Eliminado además `pos.atrSL = pos.buyPrice` tras el parcial (truncaba la cola derecha *y* ponía el stop en breakeven). | Criterio pre-registrado: Δ win rate `--partial-r=2` vs sin flag **< 3 pp**. Medido: **0,00 pp** con 16 ejecuciones parciales. Sin el fix habrían sido **+14,96 pp fantasma**. |
+| **A5** | `config.VOLTARGET.enabled = false` mientras `computeVolTargetWeight` **ignoraba el flag** y los dos bots diarios lo llamaban: el vol-targeting estaba VIVO y la config decía lo contrario. | La función honra el flag; el default pasa a `true`, que es la verdad. Sin cambio de comportamiento. | — |
+| **H7** | El "gate pareado" **no estaba pareado**: `summarize` borraba los folds sin trades, así que una variante que se va a cash perdía el fold malo y mejoraba las tres métricas sin ganar nada. | Los folds sin trades cuentan como `roi 0 / calmar 0` (irse a cash **es** un resultado). El gate exige además **mismo nº de folds evaluados**. | El walk-forward de ROT expone 1 fold flat que antes desaparecía. |
+| **H9** | `3.49 <= 3.48 + 0.01` es `false` en coma flotante → variantes suspendidas por un empate exacto. | Comparación a 2 decimales enteros. | — |
+| **H8** | El bot entra al cierre de la última vela **cerrada**; si el cron dispara horas después, ese precio está rancio (sesgo medido +0,45 % sobre un presupuesto total de costes del 0,30 %). | `entriesAreFresh` + `ENTRY_FRESHNESS_HOURS = 6`. **Solo veta APERTURAS**; las salidas se gestionan siempre. | Fail-open sin datos. |
+| **H3** | El canal ROT aportaba el **88 % del beneficio reportado** y **no tenía backtest**: `grep -rl rotation` sobre el arnés = 0 ficheros. | **`rotationBacktest.js`** (extiende `BacktestEngine` → mismos costes, contabilidad y métricas) + runner `rotation-backtest.js` + `engineClass` en `wfcore`. | Ver 14.3. |
+| — | El dashboard perdía la etiqueta EXPERIMENTAL de ROT y sumaba su ROI al titular. `buildTradeStats` contaba los breakeven como pérdidas (`profit <= 0`). | Etiqueta propagada, convención alineada con el motor, y **consolidado con y sin canales experimentales**. | Titular **+5,16 %** → **+0,50 %** excluyendo lo no validado. |
+
+### 14.2 Instrumentación nueva (A2/A4)
+
+`computeMetrics` devuelve ahora **panel por libro** (`books`, `booksSignalOnly` → global/largo/corto)
+con win rate, **win rate de BREAKEVEN** `1/(1+payoff)` y el **margen** entre ambos, profit factor,
+esperanza, **N efectivo** (fechas de entrada distintas), **intervalo de Wilson** y concentración
+top-5/top-10; **`entryInWindow`** (holdout purgado de posiciones entradas en train); y
+**`truncation`** (contrafactual de take-profit). El dashboard expone WR de breakeven, margen,
+N efectivo y Wilson por canal.
+
+Sobre el backtest regenerado (60m, 8 símbolos, costes 0,30 %):
+
+| libro | n | WR | BE-WR | margen | PF | neto | N_eff |
+|---|---|---|---|---|---|---|---|
+| global | 196 | 34,18 % | 25,15 % | +9,04 pp | 1,55 | +2.940,52 | 127 |
+| **largo** | 87 | **21,84 %** | 11,63 % | **+10,21 pp** | **2,12** | +1.975,78 | 66 |
+| **corto** | 109 | **44,04 %** | 38,33 % | **+5,71 pp** | **1,27** | +964,74 | 61 |
+
+**El libro con win rate ALTA es el que menos margen tiene.** Contrafactual: base **+2.940** →
+TP 20 % **−651** · TP 30 % +484 · TP 50 % +1.630 · TP 100 % +2.382. Holdout purgado: PF **3,46 → 2,52**.
+
+### 14.3 Primer backtest del canal ROT (H3)
+
+Universo FIJO de 16 large/mid-caps. **Limitación declarada:** no reconstruye el top-N por volumen
+point-in-time del live (imposible con la API pública), así que valida las REGLAS, no la selección
+de universo.
+
+El motor arranca con `portfolioCircuitBreaker: null` para **paridad**: `rotationBot.js` no tiene
+breaker (y el antiguo era además inerte en este canal, porque su guard `equity > 0` sobre la caja lo
+desactivaba y ROT opera con caja 0). Simular una guarda que el live no aplica habría inflado el
+resultado.
+
+- **Split 70/30, 42m:** full ROI +68,88 % (PF 1,46) pero **holdout ROI −19,32 %, PF 0,95, Calmar −0,76**.
+  Benchmark del mismo periodo: **BTC HODL +176,03 %**.
+- **Walk-forward 8 folds:** Calmar mediano 1,21 · IQR 2,47 · peor −1,86 · **ROI mediano +2,12 %** ·
+  4/7 folds con ROI>0. El fold actual (2026-03→08) da **−4,03 % con PF 0,29**. Un solo fold (+69,58 %)
+  domina el resultado.
+- **Variante gate BTC diario entre rebalanceos** (el riesgo de cola concreto: hasta 14 días sin
+  evaluar ninguna salida): **🔻 RECHAZADA** por el gate — Calmar mediano 1,21 → 0, IQR 2,47 → 2,97.
+  Implementada como opción del motor (`rotationDailyRiskOff`), **no cableada en live**.
+
+**Veredicto:** el canal que sostenía el titular tiene evidencia débil y muy dispersa, y no bate al
+HODL de BTC en su propia muestra. Sigue en shadow, ahora etiquetado y excluido del titular honesto.
+
+### 14.4 Torneos pre-registrados — resultados
+
+Rejilla declarada ANTES de correr; se archivan TODOS los valores, pasen o no.
+
+**κ — presupuesto del corto (`shortRiskFraction`), en las DOS muestras:**
+
+| κ | USDC Calmar / IQR / peor | USDT Calmar / IQR / peor | Gate |
+|---|---|---|---|
+| 1,00 (baseline) | 2,67 / 3,41 / −1,44 | 2,46 / 2,78 / −1,70 | — |
+| 0,60 | 3,14 / 3,99 / −1,42 | 3,15 / 3,66 / −1,68 | 🔻 IQR↑ |
+| 0,40 | **3,61** / 4,31 / −1,41 | **3,63** / 4,78 / −1,66 | 🔻 IQR↑ |
+| 0,25 | 3,61 / 4,48 / −1,38 | 3,50 / 4,50 / −1,65 | 🔻 IQR↑ |
+| 0,15 | 2,24 / 4,74 / −1,35 | 2,19 / 5,63 / −1,62 | 🔻 Calmar< IQR↑ |
+| 0,00 | 2,27 / 6,39 / −1,64 | 2,25 / 6,67 / −1,64 | 🔻 |
+
+**TODAS rechazadas, en AMBAS muestras** (veredicto coincidente → criterio de doble muestra
+satisfecho). Patrón consistente y monótono: menos corto ⇒ **mejor Calmar mediano**, **mejor peor
+fold**, **mayor dispersión** y **menor ROI mediano** (USDC 10,67 → 7,11). `shortRiskFraction`
+queda en **1,0**.
+
+**Condición de falsación declarada de antemano:** se predijo que κ=0,25 *subiría* `worstCalmar` y
+*bajaría* `medianCalmar`. Lo primero se cumple en ambas muestras; **lo segundo NO** — el Calmar
+mediano SUBE. La predicción queda falsada a medias y así se reporta.
+
+**Donchian de horizonte lento solo en largos:** 🔻 RECHAZADO. `medianCalmar` 2,27 → 2,87 (60d) →
+3,14 (90d) → **−0,37 (150d)**: **no hay meseta, hay un acantilado**, y el peor fold empeora en los
+tres. Pero su efecto sobre el win rate es real y monótono (canal long-only, 42m, holdout 30 %):
+
+| variante | n | WR | BE-WR | margen | PF | ROI | esperanza/trade |
+|---|---|---|---|---|---|---|---|
+| baseline | 89 | 19,10 % | 9,21 % | +9,89 | 2,33 | **+76,43 %** | 36,64 |
+| Donchian 60d | 33 | 30,30 % | 13,95 % | +16,35 | 2,68 | +51,00 % | 62,72 |
+| Donchian 90d | 24 | 41,67 % | 19,28 % | +22,39 | 2,99 | +43,62 % | 79,92 |
+| Donchian 150d | 19 | **47,37 %** | 22,73 % | +24,64 | **3,06** | +30,90 % | **85,83** |
+
+El win rate se **más que duplica** (19 % → 47 %) y la esperanza por trade también (36,64 → 85,83),
+pero el ROI total **cae un 60 %** porque toma 4× menos operaciones. Ésa es, medida sobre los datos
+del propio bot, la respuesta completa a "subir el win rate".
+
+**Base de dimensionamiento (H1):** 🔻 RECHAZADA. `sizeBasis:'equity'` mejora mucho la dispersión
+(IQR 3,41 → 2,22) y el peor fold (−1,44 → −1,05) pero baja el Calmar mediano (2,68 → 2,01). Y un
+**test de sensibilidad al ORDEN del array** (6 permutaciones fijadas a priori) **falsó la hipótesis
+del fix**:
+
+| base | rango de Calmar mediano solo por reordenar símbolos | dispersión |
+|---|---|---|
+| `cash` (actual) | 2,07 – 2,84 | **0,77** |
+| `equity` | 0,83 – 2,06 | **1,23** ← *peor* |
+
+Con base `equity` y 20 % por posición, las 5 primeras agotan el equity y el resto no entra: el
+orden pasa de repartir capital en escalera a **decidir quién opera**. `SIZING_BASIS` queda en
+`'cash'`. **Meta-hallazgo, más importante que el fix:** el baseline arrastra **0,77 de Calmar de
+ruido puro por el orden del array** — margen comparable al de adopciones históricas (el gate BTC se
+adoptó con +0,82). Varias decisiones pasadas están **dentro de la banda de ruido**. El arreglo real
+es asignación **pro-rata en lote** entre todas las señales del día, no secuencial; es un cambio de
+diseño que necesita su propia validación y queda propuesto, no improvisado.
+
+**Circuit breaker de cartera:** 🔻 RECHAZADO al medirlo por primera vez — Calmar mediano 2,74 → 2,68
+y ROI mediano 10,93 → 10,72, con IQR y peor fold idénticos. Dispara 11 veces en 60 meses. Se
+mantiene activo por prudencia (ahora **sí** mide drawdown de verdad y está en el motor), pero
+**no tiene evidencia de aportar valor** y es candidato a desactivar.
+
+### 14.5 Qué NO se cambió, y por qué
+
+Ninguna regla de trading se ha modificado. **Cero adopciones**: los cinco torneos rechazaron sus
+variantes bajo el gate de la casa. Lo aplicado son **correcciones de defectos** (blacklist, circuit
+breaker, contabilidad, frescura, gate pareado, coma flotante) e **instrumentación**. El único cambio
+de comportamiento en vivo es consecuencia de los fixes: DOT vuelve a la cesta (8/8 símbolos), el
+canal LS deja de estar bloqueado por un breaker mal medido, y no se abren posiciones con velas
+rancias.
+
+### 14.6 Herramientas nuevas
+
+- **`rotationBacktest.js`** — motor de backtest del canal de rotación (heredaba de `BacktestEngine`).
+- **`rotation-backtest.js`** — runner (`--wf` para walk-forward, `--daily-riskoff`, `--cash-buffer=`).
+- **`abtest.js --tournament=`** — torneos parametrizados (`kappa`, `sizing`, `donchian`,
+  `circuitbreaker`, `partial`), con baseline explícito (antes el baseline heredaba `btcGateLong` de
+  `REGIME` y un torneo sobre el gate **se comparaba consigo mismo**) y salida por muestra/variante.
+- **`wfcore.runWalkForward({engineClass})`** — permite validar canales con motor propio por el mismo
+  walk-forward pareado.
+- Exports de contabilidad honesta en `backtestEngine.js`: `aggregateByPosition`, `bookMetrics`,
+  `wilsonInterval`, `truncationCounterfactual`.

@@ -29,7 +29,10 @@ export async function runWalkForward(dataBySymbol, cfg = {}) {
     const orig = console.log; console.log = () => {};
     let r;
     try {
-      const engine = new BacktestEngine({
+      // `engineClass` permite validar canales con motor propio (p.ej. RotationBacktestEngine)
+      // por el MISMO walk-forward pareado y el MISMO gate de adopción.
+      const Engine = cfg.engineClass || BacktestEngine;
+      const engine = new Engine({
         symbols: [...symbols], dataBySymbol: anchored, oosSplitRatio: oosRatio,
         ...cfg.engineOpts,
       });
@@ -50,15 +53,33 @@ export async function runWalkForward(dataBySymbol, cfg = {}) {
   return { rows, summary: summarize(rows) };
 }
 
-export function summarize(rows) {
-  const valid = rows.filter(r => !r.skipped && r.trades > 0);
-  if (valid.length === 0) return { valid: 0 };
+/**
+ * Resumen por folds.
+ *
+ * ⚠️ Auditoría 2026-08-29 (H7): antes esto era `rows.filter(r => !r.skipped && r.trades > 0)`,
+ * es decir los folds SIN TRADES se BORRABAN del resumen. Eso rompe el emparejamiento que da
+ * nombre al "gate pareado": una variante que se va a cash en un fold malo simplemente pierde
+ * ese fold del cómputo y mejora mediana, IQR y peor-fold sin haber ganado nada. Irse a cash es
+ * un RESULTADO (roi 0, calmar 0), no un dato ausente — y ahora se cuenta como tal.
+ *
+ * `valid` pasa a ser el nº de folds EVALUADOS (no saltados), de modo que dos variantes solo son
+ * comparables si coinciden. `withTrades` conserva el conteo antiguo para diagnóstico.
+ */
+export function summarize(rows, opts = {}) {
+  const includeFlat = opts.includeFlatFolds !== false;
+  const evaluated = rows.filter(r => !r.skipped);
+  const valid = includeFlat
+    ? evaluated.map(r => (r.trades > 0 ? r : { ...r, roi: 0, calmar: 0, sharpe: 0, maxDD: 0, pf: null, flat: true }))
+    : evaluated.filter(r => r.trades > 0);
+  if (valid.length === 0) return { valid: 0, withTrades: 0 };
   const sorted = (key) => valid.map(r => r[key]).filter(v => v != null && isFinite(v)).sort((a, b) => a - b);
   const median = (arr) => arr.length ? arr[Math.floor(arr.length / 2)] : null;
   const q = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(p * (arr.length - 1)))] : null;
   const cal = sorted('calmar');
   return {
     valid: valid.length,
+    withTrades: valid.filter(r => !r.flat).length,
+    flatFolds: valid.filter(r => r.flat).length,
     medianROI: median(sorted('roi')),
     medianSharpe: median(sorted('sharpe')),
     medianCalmar: median(cal),
