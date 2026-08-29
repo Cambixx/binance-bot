@@ -237,4 +237,77 @@ describe('🚀 Mejoras de Auditoría 2026-07-24 (Quality & Risk Enhancements)', 
     assert.equal(entriesAreFresh(null, 6, now), true, 'null: fail-open');
   });
 
+
+  // ─────────── Modo de sizing 'equalN' (gate robusto 2026-08-29) ───────────
+
+  it("sizeBasis 'equalN': reparte equity/plazas, no positionSizePct sobre la caja", async () => {
+    const { default: BacktestEngine } = await import('../backtestEngine.js');
+    const e = new BacktestEngine({ symbols: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'], months: 1, sizeBasis: 'equalN' });
+    assert.equal(e.slotFraction(), 1 / 8, 'Con 8 símbolos, cada plaza recibe 1/8');
+    const f = new BacktestEngine({ symbols: ['A', 'B'], months: 1, sizeBasis: 'equalN', positionSlots: 4 });
+    assert.equal(f.slotFraction(), 0.25, 'positionSlots manda sobre el tamaño del universo');
+    const g = new BacktestEngine({ symbols: ['A'], months: 1 });
+    assert.equal(g.slotFraction(), null, "el modo 'cash' por defecto no usa plazas");
+  });
+
+  it("sizingBase: 'cash' devuelve la caja; 'equity'/'equalN' devuelven caja + invertido", async () => {
+    const { default: BacktestEngine } = await import('../backtestEngine.js');
+    const mk = (basis) => {
+      const e = new BacktestEngine({ symbols: ['A'], months: 1, sizeBasis: basis });
+      e.state.balance = 1000;
+      e.state.openPositions = { A: { side: 'long', amount: 1, buyPrice: 500, invested: 500 } };
+      return e;
+    };
+    assert.equal(mk('cash').sizingBase(), 1000, "'cash' ignora lo invertido");
+    assert.equal(mk('equity').sizingBase(), 1500, "'equity' suma lo invertido");
+    assert.equal(mk('equalN').sizingBase(), 1500, "'equalN' también");
+  });
+
+  // ─────────── MODO SEÑAL (2026-08-29) ───────────
+
+  it('modo señal: nocional FIJO e idéntico, sin tope de caja', async () => {
+    const { ShadowTrader } = await import('../shadowTrader.js');
+    const { SIGNAL_MODE } = await import('../config.js');
+    const t = new ShadowTrader({ storeKey: 'test', label: 'T' });
+    const s = { state: { balanceUSDC: 5000, openPositions: {}, tradeHistory: [], cooldowns: {} }, notifications: [] };
+    // 12 señales con un nominal de 5.000: en modo cartera la 6ª ya no habría entrado.
+    for (let i = 1; i <= 12; i++) t.applyBuy(s, `S${i}USDC`, 100, {});
+    const abiertas = Object.values(s.state.openPositions);
+    assert.equal(abiertas.length, 12, 'ninguna señal puede descartarse por falta de caja');
+    const nocionales = new Set(abiertas.map((p) => p.investedUSDC));
+    assert.equal(nocionales.size, 1, 'todas las señales pesan lo mismo');
+    assert.equal([...nocionales][0], SIGNAL_MODE.notionalPerSignal);
+    assert.ok(s.state.balanceUSDC < 0, 'el saldo pasa a ser un acumulador y puede ser negativo');
+  });
+
+  it('modo señal: la equity sigue cuadrando (saldo + valor de mercado)', async () => {
+    const { ShadowTrader, computePortfolioEquity } = await import('../shadowTrader.js');
+    const t = new ShadowTrader({ storeKey: 'test', label: 'T' });
+    const s = { state: { balanceUSDC: 5000, openPositions: {}, tradeHistory: [], cooldowns: {} }, notifications: [] };
+    for (let i = 1; i <= 8; i++) t.applyBuy(s, `S${i}USDC`, 100, {});
+    const precios = {};
+    for (let i = 1; i <= 8; i++) precios[`S${i}USDC`] = 100;
+    // Sin movimiento de precio, la equity debe seguir siendo el nominal menos los costes de entrada.
+    const eq = computePortfolioEquity(s.state, precios);
+    assert.ok(eq < 5000 && eq > 4950, `equity ${eq} debe ser ~5000 menos los costes de entrada`);
+  });
+
+  it('modo señal: se puede desactivar por llamada (modo cartera sigue disponible)', async () => {
+    const { ShadowTrader } = await import('../shadowTrader.js');
+    const t = new ShadowTrader({ storeKey: 'test', label: 'T' });
+    const s = { state: { balanceUSDC: 5000, openPositions: {}, tradeHistory: [], cooldowns: {} }, notifications: [] };
+    t.applyBuy(s, 'AUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
+    assert.equal(s.state.openPositions.AUSDC.investedUSDC, 1000, '20% de 5000 en modo cartera');
+    assert.equal(s.state.balanceUSDC, 4000);
+  });
+
+  it('modo señal: el circuit breaker sigue siendo puro y medible aunque no bloquee', async () => {
+    const { updateCircuitBreaker } = await import('../shadowTrader.js');
+    // La guarda conserva su semántica (se sigue pudiendo observar el drawdown); son los BOTS los
+    // que deciden no aplicarla en modo señal. Política en el llamador, no en el predicado.
+    const state = { balanceUSDC: 4400, openPositions: {}, tradeHistory: [], equityPeak: 5000 };
+    const r = updateCircuitBreaker(state, 4400);
+    assert.equal(r.active, true);
+    assert.ok(Math.abs(r.drawdownPct - 12) < 1e-9);
+  });
 });

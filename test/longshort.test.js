@@ -18,7 +18,7 @@ function makeDaily(closes, startTime = 1700000000000) {
 test('applyShort reserva margen y marca side=short', () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
-  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  t.applyShort(s, 'BTCUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
   const pos = s.state.openPositions['BTCUSDC'];
   assert.equal(pos.side, 'short');
   assert.equal(s.state.balanceUSDC, 4000);          // 20% reservado como margen
@@ -29,7 +29,7 @@ test('applyShort reserva margen y marca side=short', () => {
 test('corto GANA cuando el precio baja (neto de costes)', () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
-  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  t.applyShort(s, 'BTCUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
   t.applySell(s, 'BTCUSDC', 80, 'SIGNAL'); // cubre 20% abajo
   const tr = s.state.tradeHistory[0];
   assert.equal(tr.side, 'short');
@@ -42,7 +42,7 @@ test('corto GANA cuando el precio baja (neto de costes)', () => {
 test('corto PIERDE cuando el precio sube', () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
-  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  t.applyShort(s, 'BTCUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
   t.applySell(s, 'BTCUSDC', 120, 'SIGNAL'); // cubre 20% arriba
   const tr = s.state.tradeHistory[0];
   assert.ok(tr.profitUSDC < 0, `debería perder, profit=${tr.profitUSDC}`);
@@ -52,7 +52,7 @@ test('corto PIERDE cuando el precio sube', () => {
 test('corto plano pierde ~round-trip (≈0.30%)', () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
-  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  t.applyShort(s, 'BTCUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
   t.applySell(s, 'BTCUSDC', 100, 'SIGNAL'); // cubre al mismo precio
   const tr = s.state.tradeHistory[0];
   const expectedPct = -2 * (COSTS.feePct + COSTS.slippagePct) * 100; // ≈ -0.30%
@@ -62,7 +62,7 @@ test('corto plano pierde ~round-trip (≈0.30%)', () => {
 test('corto paga borrow/funding pro-rata a los días abiertos', () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
-  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  t.applyShort(s, 'BTCUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
   // Backdatear la apertura 10 días para simular un corto mantenido
   s.state.openPositions['BTCUSDC'].timestamp = new Date(Date.now() - 10 * 86400000).toISOString();
   t.applySell(s, 'BTCUSDC', 100, 'SIGNAL'); // cubre al mismo precio
@@ -76,7 +76,7 @@ test('corto paga borrow/funding pro-rata a los días abiertos', () => {
 test('el long-only sigue intacto (side=long, mismo comportamiento)', () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
-  t.applyBuy(s, 'ETHUSDC', 100, { sizeFraction: 0.2 });
+  t.applyBuy(s, 'ETHUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
   assert.equal(s.state.openPositions['ETHUSDC'].side, 'long');
   t.applySell(s, 'ETHUSDC', 110, 'SIGNAL');
   const tr = s.state.tradeHistory[0];
@@ -87,7 +87,7 @@ test('el long-only sigue intacto (side=long, mismo comportamiento)', () => {
 test('getStats side-aware: P&L latente del corto sube cuando baja el precio', async () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
-  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  t.applyShort(s, 'BTCUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
   // Simular getStats con la valoración a mercado (sin red): replicamos su cálculo side-aware.
   // Precio cae a 90 → P&L latente = amount·(entry-mkt) = 10·(100-90)=+100
   const pos = s.state.openPositions['BTCUSDC'];
@@ -133,7 +133,7 @@ test('motor: el funding reduce el P&L de los cortos (y a 0 lo preserva)', async 
 test('funding reduce el P&L del corto cuanto más se mantiene', () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
-  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  t.applyShort(s, 'BTCUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
   // Forzar 30 días de antigüedad del corto
   s.state.openPositions['BTCUSDC'].timestamp = new Date(Date.now() - 30 * 86400000).toISOString();
   t.applySell(s, 'BTCUSDC', 100, 'SIGNAL'); // cubre plano a 30 días
@@ -242,7 +242,7 @@ test('commitSession aborta si el balance no es finito (guard anti-NaN)', async (
 test('funding devengado en cortos abiertos reduce el unrealized de getStats', async () => {
   const t = new ShadowTrader();
   const s = fakeSession(5000);
-  t.applyShort(s, 'BTCUSDC', 100, { sizeFraction: 0.2 });
+  t.applyShort(s, 'BTCUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
   s.state.openPositions['BTCUSDC'].timestamp = new Date(Date.now() - 10 * 86400000).toISOString();
   t._loadState = async () => s.state;
   const st = await t.getStats({ BTCUSDC: 100 }); // precio plano → latente = −funding

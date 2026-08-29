@@ -2,7 +2,7 @@ import binance from './binanceService.js';
 import { longShortTrader, isCircuitBreakerPaused, updateCircuitBreaker, computePortfolioEquity } from './shadowTrader.js';
 import telegramService from './telegramService.js';
 import { evaluateStrategySMA200, computeVolTargetWeight, shortEntryAllowed, calculateATR, btcRegimeOn, entriesAreFresh } from './indicators.js';
-import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT, REGIME, ENTRY_FRESHNESS_HOURS } from './config.js';
+import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT, REGIME, ENTRY_FRESHNESS_HOURS, SIGNAL_MODE } from './config.js';
 
 /**
  * CANAL LONG/SHORT — SMA150 "always-in-the-market" (reconvierte el hueco del parado V4C-15m).
@@ -31,7 +31,9 @@ async function _runCycle() {
   console.log(`🔍 [SMA${SMA_PERIOD}-LS] Evaluando régimen diario: ${monitored.join(', ')}`);
 
   // Fracción del cash a comprometer (vol-target por-canal, igual que SMA150-1d).
+  // En MODO SEÑAL el vol-targeting no dimensiona (decisión de cartera, no señal): nocional fijo.
   const sizeFracFor = (closes) => {
+    if (SIGNAL_MODE.enabled) return 1;
     const w = computeVolTargetWeight(closes, { ...VOLTARGET, periodsPerYear: 365 });
     let frac = RISK.positionSizePct * w;
     if (w <= (VOLTARGET.minWeight ?? 0)) frac = 0;
@@ -64,7 +66,9 @@ async function _runCycle() {
     if (k.length) marketPrices[s] = k[k.length - 1].close;
   }
   const cb = updateCircuitBreaker(session.state, computePortfolioEquity(session.state, marketPrices));
-  if (cb.active) {
+  if (SIGNAL_MODE.enabled && cb.active) {
+    console.log(`ℹ️ [SMA${SMA_PERIOD}-LS] (informativo) el circuit breaker habría pausado: DD ${cb.drawdownPct.toFixed(2)}% — en modo señal NO bloquea.`);
+  } else if (cb.active) {
     console.log(`⛔ [SMA${SMA_PERIOD}-LS] Circuit Breaker ACTIVO (${cb.reason}) — DD ${cb.drawdownPct.toFixed(2)}% sobre pico ${cb.peak.toFixed(2)} → no se abren posiciones nuevas.`);
   } else if (cb.reason === 'histeresis') {
     console.log(`🟡 [SMA${SMA_PERIOD}-LS] Circuit Breaker en histéresis: pausa cumplida con DD ${cb.drawdownPct.toFixed(2)}% aún alto → se permite operar, no se re-arma.`);
@@ -138,7 +142,7 @@ async function _runCycle() {
         } else if (!canOpenLive(session.state)) {
           console.log(`🚫 [SMA${SMA_PERIOD}-LS] ${symbol} señal LARGO bloqueada por circuit breaker o cap de exposición/posiciones`);
         } else {
-          console.log(`🟢 [SMA${SMA_PERIOD}-LS] LARGO ${symbol} a ${price} (size ${(frac * 100).toFixed(0)}%)`);
+          console.log(`🟢 [SMA${SMA_PERIOD}-LS] LARGO ${symbol} a ${price}`);
           longShortTrader.applyBuy(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
         }
       }
@@ -165,7 +169,7 @@ async function _runCycle() {
         } else if (!canOpenLive(session.state)) {
           console.log(`🚫 [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO bloqueada por circuit breaker o cap de exposición/posiciones`);
         } else {
-          console.log(`🟠 [SMA${SMA_PERIOD}-LS] CORTO ${symbol} a ${price} (size ${(shortFrac * 100).toFixed(0)}%)`);
+          console.log(`🟠 [SMA${SMA_PERIOD}-LS] CORTO ${symbol} a ${price}`);
           longShortTrader.applyShort(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: shortFrac });
         }
       }
@@ -179,6 +183,8 @@ async function _runCycle() {
 // Cap de exposición en LIVE (auditoría #4): porta la guarda que el motor ya aplica, para que el
 // backtest y el live respeten los mismos límites. Valora a coste (sin llamadas extra a la API).
 function canOpenLive(state) {
+  // MODO SEÑAL: ninguna guarda de CARTERA puede impedir que se registre una señal.
+  if (SIGNAL_MODE.enabled) return true;
   if (isCircuitBreakerPaused(state)) return false;
   const open = state.openPositions;
   const count = Object.keys(open).length;

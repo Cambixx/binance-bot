@@ -2,7 +2,7 @@ import binance from './binanceService.js';
 import { rotationTrader } from './shadowTrader.js';
 import telegramService from './telegramService.js';
 import { computeRotationTargets } from './indicators.js';
-import { TOP_COINS_LIMIT, isBlacklisted, ROTATION, REGIME } from './config.js';
+import { TOP_COINS_LIMIT, isBlacklisted, ROTATION, REGIME, SIGNAL_MODE } from './config.js';
 
 /**
  * BOT DE ROTACIÓN — cross-sectional momentum + dual-momentum (investigación P3+P4). CANAL SHADOW.
@@ -120,8 +120,10 @@ async function _runRotationCycle() {
     const perPosUSDC = equity / ROTATION.topN;
     for (const sym of toBuy) {
       const px = prices[sym];
-      if (!(px > 0) || !(state.balanceUSDC > 0)) continue;
-      const sizeFraction = Math.min(1, perPosUSDC / state.balanceUSDC);
+      // MODO SEÑAL: nocional fijo y sin tope de caja — el saldo no puede descartar un target.
+      if (!(px > 0)) continue;
+      if (!SIGNAL_MODE.enabled && !(state.balanceUSDC > 0)) continue;
+      const sizeFraction = SIGNAL_MODE.enabled ? 1 : Math.min(1, perPosUSDC / state.balanceUSDC);
       rotationTrader.applyBuy(session, sym, px, { regimeMode: true, sizeFraction, smaPeriod: ROTATION.absMomLookback });
     }
   }

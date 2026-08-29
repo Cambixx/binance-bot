@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { SIGNAL_MODE } from './config.js';
 import { spawnSync } from 'child_process';
 import binance from './binanceService.js';
 
@@ -330,11 +331,36 @@ function processChannelData(channelKey, cfg, priceMap, generatedAt) {
   const totalProfit = round(currentTotalEquity - cfg.initialBalance);
   const roi = cfg.initialBalance > 0 ? round((totalProfit / cfg.initialBalance) * 100) : 0;
 
+  // ── MODO SEÑAL ──────────────────────────────────────────────────────────────────────────────
+  // Con capital ilimitado, el ROI sobre el saldo inicial deja de significar nada (crece con el nº
+  // de señales abiertas, no con la calidad). El denominador honesto es el CAPITAL DESPLEGADO:
+  // nocional × nº de operaciones. Y la métrica de calidad es el % MEDIO POR SEÑAL.
+  const deployedOpen = openPositions.reduce((sum, p) => sum + p.investedUSDC, 0);
+  const deployedClosed = trades.length * (SIGNAL_MODE.notionalPerSignal || 0);
+  const deployedCapital = round(deployedOpen + deployedClosed);
+  const returnOnDeployed = deployedCapital > 0 ? round(((realizedProfit + unrealizedProfit) / deployedCapital) * 100) : null;
+  const avgPctPerTrade = trades.length > 0
+    ? round(trades.reduce((sum, t) => sum + (t.profitPct || 0), 0) / trades.length)
+    : null;
+  const signalMode = SIGNAL_MODE.enabled ? {
+    enabled: true,
+    notionalPerSignal: SIGNAL_MODE.notionalPerSignal,
+    signalsOpen: openPositions.length,
+    signalsClosed: trades.length,
+    deployedCapital,
+    returnOnDeployed,
+    avgPctPerTrade,
+    // En modo señal `availableBalance` ya no es caja disponible: es el nominal menos lo desplegado.
+    // Negativo = se han tomado más señales de las que el nominal habría permitido. Es esperado.
+    balanceIsAccumulator: true,
+  } : { enabled: false };
+
   const curveData = buildEquityCurve(trades, openPositions, cfg.initialBalance, currentTotalEquity, generatedAt);
 
   return {
     id: channelKey,
     title: cfg.title,
+    signalMode,
     storeKey: cfg.storeKey,
     initialBalance: cfg.initialBalance,
     availableBalance,

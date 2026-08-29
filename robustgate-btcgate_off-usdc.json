@@ -1,0 +1,287 @@
+{
+  "tournament": "btcgate_off",
+  "months": 42,
+  "folds": 8,
+  "perms": 8,
+  "seed": 7,
+  "bootstrapIters": 5000,
+  "longOnly": false,
+  "symbols": [
+    "BTCUSDC",
+    "ETHUSDC",
+    "SOLUSDC",
+    "XRPUSDC",
+    "LINKUSDC",
+    "AVAXUSDC",
+    "DOTUSDC",
+    "LTCUSDC"
+  ],
+  "permutations": [
+    [
+      "BTCUSDC",
+      "ETHUSDC",
+      "SOLUSDC",
+      "XRPUSDC",
+      "LINKUSDC",
+      "AVAXUSDC",
+      "DOTUSDC",
+      "LTCUSDC"
+    ],
+    [
+      "LINKUSDC",
+      "DOTUSDC",
+      "ETHUSDC",
+      "SOLUSDC",
+      "XRPUSDC",
+      "AVAXUSDC",
+      "LTCUSDC",
+      "BTCUSDC"
+    ],
+    [
+      "DOTUSDC",
+      "AVAXUSDC",
+      "SOLUSDC",
+      "BTCUSDC",
+      "LTCUSDC",
+      "LINKUSDC",
+      "XRPUSDC",
+      "ETHUSDC"
+    ],
+    [
+      "XRPUSDC",
+      "BTCUSDC",
+      "LINKUSDC",
+      "AVAXUSDC",
+      "DOTUSDC",
+      "LTCUSDC",
+      "SOLUSDC",
+      "ETHUSDC"
+    ],
+    [
+      "LINKUSDC",
+      "SOLUSDC",
+      "XRPUSDC",
+      "DOTUSDC",
+      "AVAXUSDC",
+      "BTCUSDC",
+      "ETHUSDC",
+      "LTCUSDC"
+    ],
+    [
+      "LTCUSDC",
+      "ETHUSDC",
+      "LINKUSDC",
+      "SOLUSDC",
+      "AVAXUSDC",
+      "XRPUSDC",
+      "DOTUSDC",
+      "BTCUSDC"
+    ],
+    [
+      "SOLUSDC",
+      "LINKUSDC",
+      "XRPUSDC",
+      "ETHUSDC",
+      "DOTUSDC",
+      "BTCUSDC",
+      "AVAXUSDC",
+      "LTCUSDC"
+    ],
+    [
+      "LTCUSDC",
+      "XRPUSDC",
+      "LINKUSDC",
+      "ETHUSDC",
+      "DOTUSDC",
+      "SOLUSDC",
+      "AVAXUSDC",
+      "BTCUSDC"
+    ]
+  ],
+  "rows": [
+    {
+      "name": "baseline PRODUCCIÓN (gate on)",
+      "medianCalmar": 2.3600000000000003,
+      "iqrCalmar": 3.37,
+      "worstCalmar": -1.66,
+      "spreadByOrder": 1.0299999999999998,
+      "p": null,
+      "meanDelta": null,
+      "ci": [
+        null,
+        null
+      ],
+      "verdict": "— (baseline)"
+    },
+    {
+      "name": "QUITAR el gate BTC",
+      "medianCalmar": 2.975,
+      "iqrCalmar": 4.95,
+      "worstCalmar": -1.8,
+      "spreadByOrder": 0.43000000000000016,
+      "p": 0.8826,
+      "meanDelta": 0.46285714285714297,
+      "ci": [
+        -0.20464285714285727,
+        1.3364285714285717
+      ],
+      "verdict": "🔻 (peor↓)"
+    }
+  ],
+  "raw": [
+    {
+      "name": "baseline PRODUCCIÓN (gate on)",
+      "byPerm": [
+        {
+          "2": 3.33,
+          "3": 2.07,
+          "4": 3.47,
+          "5": -1.44,
+          "6": -0.08,
+          "7": 10,
+          "8": 2.71
+        },
+        {
+          "2": 3.4,
+          "3": 2.08,
+          "4": 2.48,
+          "5": -1.5,
+          "6": -0.05,
+          "7": 10,
+          "8": 2.96
+        },
+        {
+          "2": 3.33,
+          "3": 2.07,
+          "4": 2.24,
+          "5": -1.66,
+          "6": -0.07,
+          "7": 9.73,
+          "8": 3.03
+        },
+        {
+          "2": 3.33,
+          "3": 2.07,
+          "4": 3.11,
+          "5": -1.61,
+          "6": -0.07,
+          "7": 9.82,
+          "8": 3.25
+        },
+        {
+          "2": 3.33,
+          "3": 2.07,
+          "4": 2.55,
+          "5": -1.49,
+          "6": -0.04,
+          "7": 9.96,
+          "8": 3.11
+        },
+        {
+          "2": 3.4,
+          "3": 2.08,
+          "4": 1.67,
+          "5": -1.66,
+          "6": -0.04,
+          "7": 10,
+          "8": 3.01
+        },
+        {
+          "2": 3.4,
+          "3": 2.08,
+          "4": 2.1,
+          "5": -1.5,
+          "6": 0,
+          "7": 10,
+          "8": 2.93
+        },
+        {
+          "2": 3.4,
+          "3": 2.08,
+          "4": 2,
+          "5": -1.53,
+          "6": -0.07,
+          "7": 10,
+          "8": 3.07
+        }
+      ]
+    },
+    {
+      "name": "QUITAR el gate BTC",
+      "byPerm": [
+        {
+          "2": 2.77,
+          "3": 3.36,
+          "4": 4.8,
+          "5": -1.67,
+          "6": -0.24,
+          "7": 10,
+          "8": 2.53
+        },
+        {
+          "2": 2.81,
+          "3": 3.53,
+          "4": 5.56,
+          "5": -1.66,
+          "6": -0.23,
+          "7": 10,
+          "8": 2.89
+        },
+        {
+          "2": 2.77,
+          "3": 3.65,
+          "4": 5.37,
+          "5": -1.64,
+          "6": -0.22,
+          "7": 10,
+          "8": 3.2
+        },
+        {
+          "2": 2.77,
+          "3": 3.71,
+          "4": 4.8,
+          "5": -1.8,
+          "6": -0.15,
+          "7": 10,
+          "8": 3.05
+        },
+        {
+          "2": 2.77,
+          "3": 3.33,
+          "4": 5.02,
+          "5": -1.64,
+          "6": -0.26,
+          "7": 10,
+          "8": 2.98
+        },
+        {
+          "2": 2.81,
+          "3": 3.46,
+          "4": 5.55,
+          "5": -1.68,
+          "6": -0.12,
+          "7": 10,
+          "8": 2.97
+        },
+        {
+          "2": 2.81,
+          "3": 3.38,
+          "4": 5.02,
+          "5": -1.65,
+          "6": -0.25,
+          "7": 10,
+          "8": 2.84
+        },
+        {
+          "2": 2.81,
+          "3": 3.62,
+          "4": 4.8,
+          "5": -1.69,
+          "6": -0.05,
+          "7": 10,
+          "8": 3.04
+        }
+      ]
+    }
+  ]
+}

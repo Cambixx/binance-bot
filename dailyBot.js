@@ -2,7 +2,7 @@ import binance from './binanceService.js';
 import { dailyTrader, updateCircuitBreaker, computePortfolioEquity } from './shadowTrader.js';
 import telegramService from './telegramService.js';
 import { evaluateStrategySMA200, computeVolTargetWeight, btcRegimeOn, entriesAreFresh } from './indicators.js';
-import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, REGIME, ENTRY_FRESHNESS_HOURS } from './config.js';
+import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, REGIME, ENTRY_FRESHNESS_HOURS, SIGNAL_MODE } from './config.js';
 
 /**
  * BOT DIARIO — Market-timing de régimen SMA (estilo Faber). CANAL PARALELO al 15m.
@@ -59,8 +59,13 @@ async function _runDailyCycle() {
     const k = raw.length > 0 ? raw.slice(0, -1) : raw;
     if (k.length) marketPrices[s] = k[k.length - 1].close;
   }
+  // MODO SEÑAL: el circuit breaker es una guarda de CARTERA; aquí solo serviría para dejar de
+  // registrar señales, que es justo lo que este modo evita. Se sigue evaluando para observarlo.
   const cb = updateCircuitBreaker(session.state, computePortfolioEquity(session.state, marketPrices));
-  const cbActive = cb.active;
+  const cbActive = SIGNAL_MODE.enabled ? false : cb.active;
+  if (SIGNAL_MODE.enabled && cb.active) {
+    console.log(`ℹ️ [SMA${SMA_PERIOD}-1d] (informativo) el circuit breaker habría pausado: DD ${cb.drawdownPct.toFixed(2)}% — en modo señal NO bloquea.`);
+  }
   if (cbActive) {
     console.log(`⛔ [SMA${SMA_PERIOD}-1d] Circuit Breaker ACTIVO (${cb.reason}) — DD ${cb.drawdownPct.toFixed(2)}% sobre pico ${cb.peak.toFixed(2)} → no se abren largos nuevos.`);
   } else if (cb.reason === 'histeresis') {
@@ -90,11 +95,16 @@ async function _runDailyCycle() {
     const canOpen = symbols.includes(symbol) && !cbActive && fresh;
 
     if (signal === 'BUY' && !hasPos && canOpen && btcRiskOn && !isBlacklisted(symbol)) {
-      const w = computeVolTargetWeight(closes, { ...VOLTARGET, periodsPerYear: 365 });
-      let frac = RISK.positionSizePct * w;
-      if (w <= (VOLTARGET.minWeight ?? 0)) frac = 0;
+      // En modo señal el vol-targeting NO dimensiona: es una decisión de cartera, y descartar una
+      // señal por "peso 0" falsearía el recuento de aciertos. Nocional fijo, todas pesan igual.
+      let frac = 1;
+      if (!SIGNAL_MODE.enabled) {
+        const w = computeVolTargetWeight(closes, { ...VOLTARGET, periodsPerYear: 365 });
+        frac = RISK.positionSizePct * w;
+        if (w <= (VOLTARGET.minWeight ?? 0)) frac = 0;
+      }
       if (frac > 0) {
-        console.log(`🟢 [SMA${SMA_PERIOD}-1d] RÉGIMEN ALCISTA: ${symbol} (close > SMA${SMA_PERIOD}) a ${currentPrice} (size ${(frac * 100).toFixed(0)}%)`);
+        console.log(`🟢 [SMA${SMA_PERIOD}-1d] RÉGIMEN ALCISTA: ${symbol} (close > SMA${SMA_PERIOD}) a ${currentPrice}`);
         dailyTrader.applyBuy(session, symbol, currentPrice, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: frac });
       } else {
         console.log(`⚪ [SMA${SMA_PERIOD}-1d] ${symbol} alcista pero vol-target → peso 0 (régimen demasiado volátil)`);

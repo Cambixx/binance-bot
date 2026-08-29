@@ -600,3 +600,184 @@ rancias.
   walk-forward pareado.
 - Exports de contabilidad honesta en `backtestEngine.js`: `aggregateByPosition`, `bookMetrics`,
   `wilsonInterval`, `truncationCounterfactual`.
+
+---
+
+## 15. El gate de adopción no podía sostener sus decisiones — `robustgate.js` (2026-08-29)
+
+Los cinco torneos de §14.4 rechazaron TODAS sus variantes. Antes de aceptar ese "no", había que
+comprobar si el problema eran las variantes o **el procedimiento de decisión**. Era el procedimiento.
+
+### El diagnóstico
+
+`abtest.js` compara **tres estadísticos puntuales** (Calmar mediano, IQR, peor fold) de **una sola
+ejecución** por variante. Con esta muestra eso no distingue señal de ruido:
+
+- Reordenar el array de símbolos —sin tocar nada más— mueve el Calmar mediano del baseline
+  **0,48-0,77**. El **gate maestro BTC, hoy en producción, se adoptó con un margen de +0,82**.
+- Con 7 folds, el **IQR** es un estadístico de cola sobre ~7 puntos: el más inestable de los tres,
+  y el que más veces suspendió variantes (fue el único motivo de rechazo de κ en §14.4).
+
+### El arnés nuevo
+
+`robustgate.js` cambia cuatro cosas: corre cada variante bajo **K permutaciones del orden de
+símbolos** (el ruido entra en la medición en vez de contaminarla en silencio); parea variante y
+baseline en el **mismo (permutación, fold)**; aplica **bootstrap por CLÚSTER DE FOLD** —remuestrea
+folds enteros, porque las permutaciones de un mismo fold comparten datos y no son independientes—;
+y adopta por **P(mejora media > 0) ≥ 0,80 Y peor fold no peor**. El IQR se reporta pero **ya no veta**.
+
+Validado antes de usarlo, contra casos de respuesta conocida: mejora consistente en 7 folds → P=1,00;
+**un solo fold enorme con la MISMA media → P=0,65** (el gate viejo lo habría adoptado); ruido puro →
+P=0,48. Esa segunda fila es justo la discriminación que faltaba. PRNG determinista con semilla:
+los resultados son reproducibles y auditables.
+
+### Qué cambió el veredicto sobre κ
+
+| κ | Calmar mediano | **Δ media pareada** | **IC 95 %** | **P(Δ>0)** |
+|---|---|---|---|---|
+| USDC 0,40 | 2,45 → **3,75** | **+0,06** | [−1,48, +1,37] | 0,56 |
+| USDT 0,40 | 2,46 → **3,87** | **−0,06** | [−1,48, +1,05] | 0,48 |
+
+**La mejora del Calmar mediano era un artefacto de forma de distribución.** Fold a fold y pareado,
+la mejora media es CERO, con un intervalo que cruza el origen de lado a lado. El gate viejo
+rechazaba κ por la razón equivocada (IQR); ahora hay evidencia positiva de que **κ no aporta nada**,
+y el intervalo lo cuantifica. `shortRiskFraction` sigue en 1,0, ahora con fundamento.
+
+El IC se ensancha monótonamente al recortar el corto ([−0,50, +0,71] en κ=0,60 → [−4,39, +3,53] en
+κ=0,00): menos corto = más incertidumbre, no más robustez.
+
+### Modo de sizing `equalN` (nuevo)
+
+`sizeBasis: 'equalN'` reparte `(caja+invertido)/plazas` — el patrón que `rotationBot.js` ya usaba
+(`equity/topN`) y el único de los tres modos genuinamente independiente del orden, porque todas las
+plazas reciben lo mismo y la suma nunca agota la caja. (`'equity'` con el 20 % fijo NO lo arregla:
+las 5 primeras agotan el equity y el orden pasa de repartir capital a decidir **quién opera**.)
+
+### `equalN` bajo el gate robusto (8 permutaciones, ambas muestras)
+
+| variante | Δ USDC | Δ USDT | peor fold USDC | peor fold USDT | ruido-orden USDC | ruido-orden USDT |
+|---|---|---|---|---|---|---|
+| baseline `cash` | — | — | −1,66 | −1,77 | **1,03** | **0,86** |
+| **EQUAL-N 6 plazas** | −0,13 [−0,40, +0,09] | +0,12 [−0,18, +0,35] | **−1,57** | **−1,61** | **0,01** | **0,62** |
+| EQUAL-N (equity/8) | −0,14 [−0,29, −0,01] | +0,01 [−0,17, +0,25] | −1,74 | −1,74 | 0,59 | 0,48 |
+| EQUITY basis (20 %) | −0,26 | −0,22 | −1,78 | −1,80 | 0,54 | 1,08 |
+
+`EQUAL-N 6 plazas` es la única variante de TODOS los torneos que, en las **dos** muestras: deja el
+Calmar estadísticamente indistinguible del baseline (el signo del delta se invierte entre muestras),
+**mejora el peor fold**, y **reduce el ruido por orden**. Aun así **NO se adopta**: P = 0,15 (USDC) y
+0,79 (USDT), por debajo del 0,80 pre-registrado.
+
+Y una cautela sobre nuestro propio dato: con 5 permutaciones el ruido-orden de esta variante salió
+0,010 en USDC; con 8, el mismo estadístico da 0,62 en USDT. **El rango sobre pocas permutaciones es
+él mismo ruidoso** — no debe leerse como "elimina la dependencia del orden", solo como "la reduce".
+
+**Nota de método, para no moverse la portería:** el criterio P≥0,80 detecta MEJORAS. `equalN` no es
+una mejora de retorno, es una **de-riskificación**: quita un parámetro oculto (el orden del array)
+al coste de cero Calmar medible. Juzgarla con un criterio de no-inferioridad daría otro veredicto,
+pero ese criterio no estaba pre-registrado y **no se inventa a posteriori**. Queda implementada
+(`sizeBasis:'equalN'`, `positionSlots`), apagada, y la decisión es del dueño del capital.
+
+### 🔴 El gate maestro BTC — un parámetro EN PRODUCCIÓN — no sobrevive
+
+`REGIME.btcEnabled = true` está vivo desde 2026-07-10, adoptado con "Calmar mediano 2,37 → 3,19"
+(+0,82 en UNA ejecución). Sometido al gate robusto, 8 permutaciones, ambas muestras:
+
+| muestra | Calmar mediano sin gate → con gate | **Δ media pareada** | **IC 95 %** | **P(Δ>0)** |
+|---|---|---|---|---|
+| USDC | 2,98 → 2,36 | **−0,46** | [−1,34, +0,20] | **0,117** |
+| USDT | 2,99 → 2,27 | **−0,05** | [−1,89, +1,66] | **0,476** |
+
+**El signo se ha invertido respecto a su adopción.** Lo que se midió como +0,82 de mejora es −0,46
+y −0,05 al parear fold a fold sobre varias ordenaciones. Los IC cruzan el cero, así que **no** se
+puede afirmar que el gate haga daño; lo que sí queda establecido es que **no hay ninguna evidencia
+de que ayude**, y que su adopción original descansaba en un margen indistinguible del ruido de
+reordenar un array (0,43-0,67 en estas mismas corridas).
+
+**Y la dirección inversa, para no quedarse con la lectura que conviene.** Si el baseline es la
+PRODUCCIÓN ACTUAL (gate ON) y la variante es quitarlo:
+
+| muestra | Δ de QUITAR el gate | IC 95 % | P(Δ>0) | peor fold | veredicto |
+|---|---|---|---|---|---|
+| USDC | +0,46 | [−0,20, +1,34] | **0,883** ✅ | −1,66 → **−1,80** ❌ | 🔻 peor fold |
+| USDT | +0,05 | [−1,66, +1,89] | 0,524 ❌ | −1,77 → −1,78 | 🔻 P<0,80 |
+
+**Quitarlo tampoco pasa el gate.** En USDC supera el umbral de probabilidad pero empeora el peor
+fold; en USDT es neutro. La conclusión simétrica y honesta es que **esta muestra no puede resolver
+el efecto del gate BTC**: no hay evidencia de que ayude ni de que quitarlo ayude. Se **mantiene
+activo** (el peor fold es algo mejor con él, lo que encaja con su papel de protección de cola),
+pero **deja de estar "validado"**: su ficha en §11 debe leerse como una adopción no respaldada.
+
+Este es el hallazgo más incómodo de la auditoría: no es una propuesta rechazada, es **una decisión
+ya tomada y corriendo en vivo** cuya justificación no sobrevive al instrumento correcto.
+
+### Lo que este arnés NO cambia
+
+Sigue sin haber adopciones. Pero ahora los rechazos son afirmaciones medidas ("la mejora media es
+cero, IC [−1,48, +1,37]") en vez de comparaciones de estadísticos puntuales dentro de la banda de
+ruido. **Regla nueva de la casa: ninguna adopción futura es válida si no supera el gate en varias
+permutaciones del orden de símbolos.** Un margen inferior a ~0,8 de Calmar en una sola ejecución
+es indistinguible de reordenar un array.
+
+---
+
+## 16. MODO SEÑAL — de simulador de cartera a generador de señales (2026-08-29)
+
+Cambio pedido por el usuario: **poner los tres canales a cero y quitar el límite de 5.000 USDC para
+que simplemente den señales.**
+
+### Por qué era el cambio correcto
+
+El capital acotado no solo limitaba: **contaminaba la medición**. Con `positionSizePct` sobre la
+caja remanente, el bot (a) **dejaba de registrar señales válidas** al quedarse sin efectivo, y
+(b) las que registraba recibían tamaños en escalera geométrica según el **orden del array**
+(1.000 vs 266 USDC entre la primera y la séptima del 24-jul). Las dos cosas ensucian justo lo que
+se quiere saber: cuántas señales aciertan y cuánto rinde cada una. Es también, de raíz, el mismo
+problema que §15 midió como 0,48-1,03 de Calmar de ruido puro.
+
+### Qué cambia
+
+`SIGNAL_MODE` en `config.js` (`enabled: true`, `notionalPerSignal: 1000`):
+
+| | Antes (cartera) | Ahora (señal) |
+|---|---|---|
+| Tamaño | `caja · 20 %` → escalera geométrica | **nocional fijo**, todas las señales pesan igual |
+| Sin caja | la señal se **descartaba en silencio** | se registra siempre |
+| Guardas de CARTERA (circuit breaker, `maxExposurePct`, `maxConcurrentPositions`) | bloqueaban entradas | **inertes** (el breaker se sigue evaluando y se **loguea** como informativo) |
+| Guardas de ESTRATEGIA (régimen BTC, `confirmDays`, cooldowns, crash guard, frescura) | activas | **activas** — forman parte de la señal, no de la cartera |
+| Vol-targeting | dimensionaba | no dimensiona (es una decisión de cartera) |
+| `balanceUSDC` | caja disponible | **acumulador**; puede ser negativo = más señales de las que el nominal permitiría |
+
+La aritmética de equity sigue cuadrando: `equity = saldo + valor de mercado = nominal + realizado +
+latente`. Lo que deja de tener sentido es el **ROI sobre el saldo inicial** (crece con el nº de
+señales abiertas, no con la calidad). El reporteador añade por canal: `signalsOpen`,
+`signalsClosed`, `deployedCapital`, **`returnOnDeployed`** (el denominador honesto) y
+**`avgPctPerTrade`**.
+
+### Separación deliberada: el motor NO entra en modo señal por defecto
+
+`--signal` es **opt-in** en `backtest.js`. Con capital ilimitado no hay drawdown ni Calmar, así que
+el gate de adopción (`abtest.js`, `robustgate.js`) **debe seguir corriendo en modo CARTERA**. Son
+dos preguntas distintas y ambas legítimas: *"¿acierta la señal?"* (modo señal, métricas por
+operación) y *"¿qué le pasa a una cartera que la sigue?"* (modo cartera, Calmar y drawdown).
+
+Medido con `node backtest.js --sma200 --months=42 --signal` (canal largo, costes 0,30 %):
+
+| | valor |
+|---|---|
+| Señales | 79 (21 aciertos / 58 fallos) |
+| Win rate | **26,58 %** |
+| Profit factor | **1,97** |
+| Esperanza | **+47,83 USDC por señal** (+4,78 % sobre el nocional) |
+| Avg win / avg loss | +365,01 / −67,01 → **payoff 5,45:1** |
+| Holdout (23 señales) | WR 47,83 %, PF 1,60 |
+
+Éste es el perfil real del canal: **acierta 1 de cada 4, y cada acierto vale 5,45 fallos.**
+
+### Reset
+
+Los cinco blobs borrados (`bot_state_daily_v1`, `bot_state_ls_v1`, `bot_state_rotation_v1`,
+`heartbeat_meta` y el huérfano `bot_state_v2` del V4C parado). Store vacío, verificado. El estado
+anterior queda archivado en **`state-archive/`** — incluidas las 7 únicas operaciones cerradas que
+ha tenido el bot (−422,86 USDC realizados), por si hay que volver a ellas.
+
+Tests: **81 en verde** (eran 61 al empezar la auditoría).

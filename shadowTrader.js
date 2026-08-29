@@ -1,6 +1,6 @@
 import { getStore } from '@netlify/blobs';
 import telegramService from './telegramService.js';
-import { RISK, COSTS, INITIAL_BALANCE, PORTFOLIO_CIRCUIT_BREAKER, SIZING_BASIS } from './config.js';
+import { RISK, COSTS, INITIAL_BALANCE, PORTFOLIO_CIRCUIT_BREAKER, SIZING_BASIS, SIGNAL_MODE } from './config.js';
 
 
 /**
@@ -207,12 +207,23 @@ class ShadowTrader {
       return false;
     }
 
-    const sizeFraction = Number(options.sizeFraction ?? RISK.positionSizePct);
-    // Base de dimensionamiento (H1): 'equity' hace que el reparto no dependa del orden del array.
-    const sizeBase = (options.sizeBasis ?? SIZING_BASIS) === 'equity'
-      ? portfolioEquityAtCost(state) : state.balanceUSDC;
-    const investAmountUSDC = Math.min(sizeBase * sizeFraction, state.balanceUSDC);
+    // MODO SEÑAL: nocional FIJO y sin tope de caja — ninguna señal se pierde por falta de efectivo,
+    // y todas pesan igual en las estadísticas (sin la escalera geométrica del orden del array).
+    const signalMode = options.signalMode ?? SIGNAL_MODE.enabled;
+    let investAmountUSDC, sizeFraction = null;
+    if (signalMode) {
+      investAmountUSDC = Number(options.notional ?? SIGNAL_MODE.notionalPerSignal);
+    } else {
+      sizeFraction = Number(options.sizeFraction ?? RISK.positionSizePct);
+      // Base de dimensionamiento (H1): 'equity' hace que el reparto no dependa del orden del array.
+      const sizeBase = (options.sizeBasis ?? SIZING_BASIS) === 'equity'
+        ? portfolioEquityAtCost(state) : state.balanceUSDC;
+      investAmountUSDC = Math.min(sizeBase * sizeFraction, state.balanceUSDC);
+    }
     if (!(investAmountUSDC > 0) || !(price > 0)) return false;
+    const sizeLabel = signalMode
+      ? `${investAmountUSDC.toFixed(2)} USDC (nocional fijo por señal)`
+      : `${investAmountUSDC.toFixed(2)} USDC (${(sizeFraction * 100).toFixed(0)}% del saldo)`;
 
     // Costes de entrada (paridad backtest): slippage en el precio + fee sobre el notional.
     const fillPrice = price * (1 + COSTS.slippagePct);
@@ -252,12 +263,12 @@ class ShadowTrader {
       `🚨 <b>SEÑAL DE COMPRA</b> · ${telegramService.escape(this.label)}\n\n` +
       `<b>Moneda:</b> #${tag}\n` +
       `<b>Precio Entrada:</b> ${price.toFixed(4)} USDC\n` +
-      `<b>Tamaño sugerido:</b> ${investAmountUSDC.toFixed(2)} USDC (${(sizeFraction * 100).toFixed(0)}% del saldo)\n\n` +
+      `<b>Tamaño sugerido:</b> ${sizeLabel}\n\n` +
       nivelesBlock +
       `<i>Señal probabilística, no garantía. Neto de ~0.30% de costes. Registrada en el simulador.</i>`
     );
 
-    console.log(`🟢 [${this.label}] BUY ${symbol} a ${price} USDC (size ${(sizeFraction * 100).toFixed(0)}%)`);
+    console.log(`🟢 [${this.label}] BUY ${symbol} a ${price} USDC (${sizeLabel})`);
     return true;
   }
 
@@ -272,11 +283,20 @@ class ShadowTrader {
       console.log(`[Shadow] Ya tienes una posición abierta en ${symbol}.`);
       return false;
     }
-    const sizeFraction = Number(options.sizeFraction ?? RISK.positionSizePct);
-    const sizeBase = (options.sizeBasis ?? SIZING_BASIS) === 'equity'
-      ? portfolioEquityAtCost(state) : state.balanceUSDC;
-    const marginUSDC = Math.min(sizeBase * sizeFraction, state.balanceUSDC);
+    const signalModeS = options.signalMode ?? SIGNAL_MODE.enabled;
+    let marginUSDC, sizeFractionS = null;
+    if (signalModeS) {
+      marginUSDC = Number(options.notional ?? SIGNAL_MODE.notionalPerSignal);
+    } else {
+      sizeFractionS = Number(options.sizeFraction ?? RISK.positionSizePct);
+      const sizeBase = (options.sizeBasis ?? SIZING_BASIS) === 'equity'
+        ? portfolioEquityAtCost(state) : state.balanceUSDC;
+      marginUSDC = Math.min(sizeBase * sizeFractionS, state.balanceUSDC);
+    }
     if (!(marginUSDC > 0) || !(price > 0)) return false;
+    const sizeLabelS = signalModeS
+      ? `${marginUSDC.toFixed(2)} USDC (nocional fijo por señal)`
+      : `${marginUSDC.toFixed(2)} USDC (${(sizeFractionS * 100).toFixed(0)}% del saldo)`;
 
     state.balanceUSDC -= marginUSDC;
     state.openPositions[symbol] = {
@@ -295,11 +315,11 @@ class ShadowTrader {
       `🚨 <b>SEÑAL DE VENTA EN CORTO (SHORT)</b> · ${telegramService.escape(this.label)}\n\n` +
       `<b>Moneda:</b> #${tag}\n` +
       `<b>Precio Entrada (short):</b> ${price.toFixed(4)} USDC\n` +
-      `<b>Tamaño sugerido:</b> ${marginUSDC.toFixed(2)} USDC (${(sizeFraction * 100).toFixed(0)}% del saldo)\n\n` +
+      `<b>Tamaño sugerido:</b> ${sizeLabelS}\n\n` +
       `📊 <b>Gestión:</b> mantener el corto mientras el cierre diario &lt; SMA${options.smaPeriod || 150}; cubrir/cerrar y pasar a largo si lo supera (sin TP/SL fijo).\n\n` +
       `<i>Señal probabilística (lado corto NO validado a largo plazo). Neto de ~0.30% de costes.</i>`
     );
-    console.log(`🟠 [${this.label}] SHORT ${symbol} a ${price} USDC (size ${(sizeFraction * 100).toFixed(0)}%)`);
+    console.log(`🟠 [${this.label}] SHORT ${symbol} a ${price} USDC (${sizeLabelS})`);
     return true;
   }
 

@@ -9,7 +9,7 @@ import {
 } from './indicators.js';
 import { evaluateFixedExit } from './exits.js';
 import binance, { cumRateAt } from './binanceService.js';
-import { BLACKLIST, isBlacklisted, RISK, COSTS, LOOKBACK_15M, LONGSHORT, REGIME, SIZING_BASIS, PORTFOLIO_CIRCUIT_BREAKER } from './config.js';
+import { BLACKLIST, isBlacklisted, RISK, COSTS, LOOKBACK_15M, LONGSHORT, REGIME, SIZING_BASIS, PORTFOLIO_CIRCUIT_BREAKER, SIGNAL_MODE } from './config.js';
 
 const BINANCE_API_BASE = 'https://data-api.binance.vision/api/v3';
 
@@ -103,8 +103,31 @@ class BacktestEngine {
     // el P&L hundiéndose un 70 %. No aplicar al corto bajo ningún concepto.
     this.donchianLongGate = options.donchianLongGate ?? null;
 
-    // Base de dimensionamiento (H1): 'cash' (histórico) | 'equity' (order-independent).
+    // Base de dimensionamiento (H1). Tres modos:
+    //   'cash'   → `balance · positionSizePct` (histórico). La exposición acumulada es 1−0,8^n, así
+    //              que el reparto cae en escalera geométrica y el ÍNDICE del símbolo en el array
+    //              decide su peso (3,76:1 entre el primero y el último con 7 posiciones).
+    //   'equity' → `(balance+invertido) · positionSizePct`. Medido: NO arregla la dependencia del
+    //              orden, la EMPEORA (dispersión del Calmar mediano 0,77 → 1,23), porque con el
+    //              20 % fijo las 5 primeras agotan el equity y el resto simplemente no entra: el
+    //              orden pasa de repartir capital a decidir QUIÉN opera.
+    //   'equalN' → `(balance+invertido) / positionSlots`. Reparto EQUIPONDERADO sobre un nº de
+    //              plazas declarado. Es el patrón que `rotationBot.js` ya usaba (`equity/topN`) y
+    //              el único de los tres que es genuinamente independiente del orden: todas las
+    //              plazas reciben lo mismo y la suma nunca agota la caja.
     this.sizeBasis = options.sizeBasis ?? SIZING_BASIS;
+    // Nº de plazas de cartera para 'equalN'. Default = tamaño del universo (equiponderado puro).
+    this.positionSlots = options.positionSlots ?? null;
+
+    // MODO SEÑAL en el motor — OPT-IN, nunca por defecto (`node backtest.js --signal`).
+    // Mide lo MISMO que mide el bot live desde 2026-08-29: nocional fijo por señal y capital
+    // ilimitado, para que win rate, % medio por operación y profit factor describan la SEÑAL y no
+    // la cartera. ⚠️ Con capital ilimitado, MaxDrawdown / Calmar / ROI pierden sentido económico,
+    // así que el gate de adopción (`abtest.js`, `robustgate.js`) debe seguir corriendo en modo
+    // CARTERA. Son dos preguntas distintas: "¿acierta la señal?" vs "¿qué hace la cartera?".
+    this.signalMode = options.signalMode
+      ? { notional: options.signalMode.notional ?? SIGNAL_MODE.notionalPerSignal }
+      : null;
 
     // Circuit breaker de cartera (auditoría 2026-08-29 H2): existía SOLO en el live, así que
     // ningún backtest publicado describía la estrategia que realmente corre. Se porta aquí para
@@ -563,6 +586,7 @@ class BacktestEngine {
   // auditoría 2026-07-03 #5). Exposición SIDE-AWARE: un corto compromete su MARGEN (invested),
   // no el nocional a mercado (antes un rally agregado bloqueaba aperturas de más).
   canOpenPosition(currentPrices, isAdd = false) {
+    if (this.signalMode) return true;           // en modo señal no hay guardas de cartera
     if (this.cbPausedUntil > 0) return false;   // pausa vigente del circuit breaker
     const maxPos = this.maxConcurrentPositions ?? (this.longShort ? LONGSHORT.maxConcurrentPositions : null);
     const maxExp = this.maxExposurePct ?? (this.longShort ? LONGSHORT.maxExposurePct : null);
@@ -583,16 +607,31 @@ class BacktestEngine {
   // Base sobre la que se aplica la fracción de tamaño. 'equity' = caja + coste de las abiertas:
   // invariante dentro de la misma barra, así que el reparto NO depende del orden de los símbolos.
   sizingBase() {
-    if (this.sizeBasis !== 'equity') return this.state.balance;
+    if (this.sizeBasis === 'cash') return this.state.balance;
     let invested = 0;
     for (const s in this.state.openPositions) invested += this.state.openPositions[s].invested || 0;
     return this.state.balance + invested;
   }
 
+  /** Fracción del BASE que recibe una posición nueva. En 'equalN' es 1/plazas, no positionSizePct. */
+  slotFraction() {
+    if (this.sizeBasis !== 'equalN') return null;
+    const slots = this.positionSlots ?? (this.symbols.length || 1);
+    return slots > 0 ? 1 / slots : null;
+  }
+
   executeBuy(symbol, price, time, entryATR = null, buf = null) {
-    const sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf);
-    if (sizeFrac <= 0) return; // vol-targeting devolvió peso 0 (régimen demasiado volátil)
-    const investAmount = Math.min(this.sizingBase() * sizeFrac, this.state.balance);
+    let investAmount;
+    if (this.signalMode) {
+      investAmount = this.signalMode.notional;   // fijo, sin tope de caja: no se pierde una señal
+    } else {
+      let sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf);
+      // 'equalN': la plaza manda sobre positionSizePct; el vol-target sigue aplicando como recorte.
+      const slot = this.slotFraction();
+      if (slot != null) sizeFrac = slot * (this.positionSizePct > 0 ? sizeFrac / this.positionSizePct : 1);
+      if (sizeFrac <= 0) return; // vol-targeting devolvió peso 0 (régimen demasiado volátil)
+      investAmount = Math.min(this.sizingBase() * sizeFrac, this.state.balance);
+    }
     if (!(investAmount > 0)) return;
 
     // Costes de entrada: slippage (peor precio de compra) + comisión sobre el notional.
@@ -668,9 +707,16 @@ class BacktestEngine {
   }
 
   executeShortOpen(symbol, price, time, buf = null) {
-    const sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf) * (this.shortRiskFraction ?? 1) * this.shortRiskMultiplier(symbol, time);
-    if (sizeFrac <= 0) return;
-    const invested = Math.min(this.sizingBase() * sizeFrac, this.state.balance); // margen reservado
+    let invested;
+    if (this.signalMode) {
+      invested = this.signalMode.notional;
+    } else {
+      let sizeFrac = this.computeSizeFraction(buf) * this.entryTiltMult(buf) * (this.shortRiskFraction ?? 1) * this.shortRiskMultiplier(symbol, time);
+      const slotS = this.slotFraction();
+      if (slotS != null) sizeFrac = slotS * (this.positionSizePct > 0 ? sizeFrac / this.positionSizePct : 1);
+      if (sizeFrac <= 0) return;
+      invested = Math.min(this.sizingBase() * sizeFrac, this.state.balance); // margen reservado
+    }
     if (!(invested > 0)) return;
     const amount = invested / price;
     this.state.balance -= invested;

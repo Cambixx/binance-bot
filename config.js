@@ -199,5 +199,31 @@ export const PORTFOLIO_CIRCUIT_BREAKER = {
   pauseHours: 48,          // 48 horas de pausa tras el corte
 };
 
+// ─────────────────────────── MODO SEÑAL ───────────────────────────
+// Convierte los bots de SIMULADOR DE CARTERA en GENERADOR DE SEÑALES (2026-08-29, a petición).
+//
+// Problema que resuelve: con capital acotado a 5.000 USDC y `positionSizePct` sobre la caja
+// remanente, el bot DEJABA DE REGISTRAR señales válidas al quedarse sin efectivo — y las que sí
+// registraba recibían tamaños en escalera geométrica según el ORDEN del array (1.000 vs 266 USDC
+// entre la primera y la séptima). Eso contamina justo lo que se quiere medir: cuántas señales
+// aciertan y cuánto rinde cada una.
+//
+// En modo señal:
+//   · Cada señal abre SIEMPRE una posición de nocional FIJO → todas pesan igual en las métricas.
+//   · Ninguna guarda de CARTERA bloquea una señal (circuit breaker, caps de exposición y de
+//     nº de posiciones quedan inertes). Las guardas de ESTRATEGIA siguen activas —régimen BTC,
+//     confirmDays, cooldowns, crash guard— porque forman parte de la señal, no de la cartera.
+//   · El vol-targeting no dimensiona: es una decisión de cartera, no una señal.
+//   · `balanceUSDC` deja de ser una restricción y pasa a ser un acumulador (puede ser negativo:
+//     significa capital comprometido por encima del nominal). Las métricas que importan pasan a
+//     ser POR OPERACIÓN: win rate, % medio por trade, profit factor y esperanza.
+//
+// ⚠️ Con capital ilimitado, MaxDrawdown / Calmar / ROI sobre el saldo inicial dejan de tener
+// sentido económico. Usar el panel por libro (`books`) y el retorno sobre capital desplegado.
+export const SIGNAL_MODE = {
+  enabled: true,
+  notionalPerSignal: 1000,  // USDC por señal. Unidad de medida, no una decisión de riesgo.
+};
+
 // ─────────────────────────── Capital ───────────────────────────
 export const INITIAL_BALANCE = 5000; // Saldo virtual inicial (shadow mode)

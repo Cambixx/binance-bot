@@ -134,6 +134,8 @@ async function main() {
     atrTrailMult: atrTrailArg ? parseFloat(atrTrailArg.split('=')[1]) : 3.0,
     partialExitAtR: partialArg ? parseFloat(partialArg.split('=')[1]) : 0,
     regimeOpts,
+    // --signal: nocional fijo y capital ilimitado (mide la SEÑAL, no la cartera).
+    signalMode: args.includes('--signal') ? {} : null,
     feePct,
     slippagePct
   };
