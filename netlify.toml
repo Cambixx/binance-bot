@@ -1,7 +1,20 @@
 [build]
   functions = "netlify/functions"
+  # Panel web de señales (estático + /api/dashboard-data que lee los blobs en vivo).
+  publish = "public"
+  command = "node build-dashboard-data.js"
 
 [dev]
   port = 8888
 
 
+
+# El panel expone la operativa del bot. Es dinero VIRTUAL, pero no hay razón para que lo indexe
+# un buscador: la URL se comparte a mano.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Robots-Tag = "noindex, nofollow"
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"

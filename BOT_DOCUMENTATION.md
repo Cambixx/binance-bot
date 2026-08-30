@@ -310,3 +310,50 @@ Desde 2026-05-29 **todos los parámetros viven en `config.js`** (fuente única d
 *   **Mensaje Telegram con datos obsoletos** (SL −2.5%, "V3", trail 1.0%) → ahora lee de `config.js` (SL real, "V4C-COMBO", trail 1.5%).
 *   **Backtest sin costes** → modelo de fees+slippage en motor y ledger (§2.6).
 *   **Blacklist/params triplicados** → centralizados en `config.js`.
+
+---
+
+## 🖥️ Panel web de señales (2026-08-30)
+
+Segunda vía de visualización, además del informe estático `shadow-report.js`. La diferencia:
+**lee el estado en vivo**, no hay que regenerar nada a mano.
+
+```
+public/index.html                    el panel (vanilla JS + SVG; sin dependencias)
+public/data/analysis.json            análisis destilado (116 KB)
+netlify/functions/dashboard-data.js  API de SOLO LECTURA → /api/dashboard-data
+build-dashboard-data.js              destila los artefactos crudos (~800 KB) al JSON del panel
+```
+
+### Uso
+
+```bash
+npm run build-dashboard   # regenera public/data/analysis.json desde los artefactos
+npm run dashboard         # lo anterior + netlify dev  →  http://localhost:8888
+```
+
+En producción lo sirve Netlify: `publish = "public"` y `command = "node build-dashboard-data.js"`,
+así que **cada deploy reconstruye el análisis** a partir de los artefactos del repo.
+
+### Qué muestra
+
+| Pestaña | Contenido |
+|---|---|
+| **En vivo** | Los 3 canales leídos de los blobs: señales abiertas con su P&L, historial de cerradas, y el panel por libro (win rate **junto a** su breakeven, margen, payoff, N efectivo, Wilson 95 %). Más el **estado de los dos gates** que producen silencio: régimen BTC y frescura de la vela. |
+| **Señales · histórico** | Backtests en MODO SEÑAL: P&L acumulado, distribución del resultado por señal, contrafactual de truncamiento, train vs holdout (con la versión purgada) y panel por libro. |
+| **Validación** | *Forest plot* del gate robusto — punto = mejora media pareada, barra = IC 95 %. Se lee de un vistazo si el intervalo cruza el cero. Más el walk-forward por folds. |
+| **Rotación** | El primer backtest del canal experimental, con su holdout y el aviso de universo fijo. |
+
+### Decisiones de diseño que importan
+
+- **No dibuja la curva de equity en modo señal.** Con capital ilimitado y hasta 8 posiciones a la
+  vez, la equity oscila ~8× el movimiento unitario y superponerle un HODL que despliega 5.000 USDC
+  compararía cosas con distinto capital desplegado. Se dibuja el **P&L acumulado de las señales**,
+  que con nocional fijo es proporcional a la suma de porcentajes — la forma estándar de evaluar un
+  generador de señales. El HODL queda como cifra de referencia, no como serie en el mismo eje.
+- **La win rate nunca aparece sola**: siempre junto a su win rate de breakeven y el margen.
+- **El panel no recalcula nada**: lee los mismos artefactos que cita `AUDIT_REPORT.md`, así que no
+  puede discrepar de él.
+- Paleta validada con el script de la guía de dataviz (CVD ΔE 9,2 claro / 9,4 oscuro). Estado =
+  color + icono + texto, nunca color solo. Tema claro y oscuro, ambos diseñados.
+- `noindex` + `robots.txt`: la URL es pública pero no se indexa; se comparte a mano.
