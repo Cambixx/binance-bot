@@ -1131,3 +1131,210 @@ export function entriesAreFresh(rawKlines, maxHours = 6, now = Date.now()) {
   if (!Number.isFinite(ageHours) || ageHours < 0) return true; // reloj raro → no bloquear
   return ageHours <= maxHours;
 }
+
+// ============================================================
+//  MACRO OSCILLATOR & ANTI-FOMO (Videos 1 & 2)
+// ============================================================
+
+/**
+ * Calcula la serie completa del oscilador macro normalizado: (SMA_fast - SMA_slow) / SMA_slow * 100
+ * @param {number[]} closes 
+ * @param {number} fastPeriod (default 50)
+ * @param {number} slowPeriod (default 200)
+ * @returns {Array<number|null>}
+ */
+export function calculateMacroOscillator(closes, fastPeriod = 50, slowPeriod = 200) {
+  const n = closes.length;
+  const osc = new Array(n).fill(null);
+  if (n < slowPeriod) return osc;
+
+  let sumFast = 0;
+  let sumSlow = 0;
+
+  for (let i = 0; i < n; i++) {
+    sumFast += closes[i];
+    sumSlow += closes[i];
+
+    if (i >= fastPeriod) sumFast -= closes[i - fastPeriod];
+    if (i >= slowPeriod) sumSlow -= closes[i - slowPeriod];
+
+    if (i >= slowPeriod - 1) {
+      const smaFast = sumFast / fastPeriod;
+      const smaSlow = sumSlow / slowPeriod;
+      osc[i] = smaSlow !== 0 ? ((smaFast - smaSlow) / smaSlow) * 100 : 0;
+    }
+  }
+  return osc;
+}
+
+/**
+ * Calcula la Bull Market Support Band: EMA 20 semanas (~140 días) + SMA 21 semanas (~147 días)
+ * @param {number[]} closes
+ * @param {number} emaPeriod (default 140)
+ * @param {number} smaPeriod (default 147)
+ */
+export function calculateBullMarketSupportBand(closes, emaPeriod = 140, smaPeriod = 147) {
+  const emaVals = calculateEMA(closes, emaPeriod);
+  const ema20w = new Array(closes.length).fill(null);
+  if (Array.isArray(emaVals) && emaVals.length > 0) {
+    const offset = closes.length - emaVals.length;
+    for (let i = 0; i < emaVals.length; i++) {
+      ema20w[offset + i] = emaVals[i];
+    }
+  }
+
+  const sma21w = new Array(closes.length).fill(null);
+  let sum = 0;
+  for (let i = 0; i < closes.length; i++) {
+    sum += closes[i];
+    if (i >= smaPeriod) sum -= closes[i - smaPeriod];
+    if (i >= smaPeriod - 1) sma21w[i] = sum / smaPeriod;
+  }
+
+  return { ema20w, sma21w };
+}
+
+/**
+ * Calcula la racha (streak) de días/velas consecutivas sin una corrección >= thresholdPct (15%) desde el último pico.
+ * @param {number[]} highs
+ * @param {number[]} lows
+ * @param {number[]} closes
+ * @param {number} thresholdPct (default 0.15 = 15%)
+ */
+export function calculateCorrectionStreak(highs, lows, closes, thresholdPct = 0.15) {
+  const n = closes.length;
+  const streaks = new Array(n).fill(0);
+  if (n === 0) return streaks;
+
+  let peak = highs && highs[0] != null ? highs[0] : closes[0];
+  let currentStreak = 0;
+
+  for (let i = 0; i < n; i++) {
+    const h = (highs && highs[i] != null) ? highs[i] : closes[i];
+    const l = (lows && lows[i] != null) ? lows[i] : closes[i];
+
+    if (h > peak) peak = h;
+
+    const dd = peak > 0 ? (peak - l) / peak : 0;
+    if (dd >= thresholdPct) {
+      currentStreak = 0;
+      peak = closes[i];
+    } else {
+      currentStreak++;
+    }
+    streaks[i] = currentStreak;
+  }
+  return streaks;
+}
+
+/**
+ * ESTRATEGIA MACRO OSCILLATOR & ANTI-FOMO (Videos 1 & 2)
+ * 
+ * - Entrada BUY:
+ *   1. Divergencia alcista en Zona Verde (descuento extremo < -6%).
+ *   2. Apoyo / Rebote en Línea Cero (Osc ~ 0 con precio > SMA200).
+ *   3. Cruce alcista de Cero estándar (si el filtro Anti-FOMO lo permite).
+ *   4. Buy The Dip en la Bull Market Support Band tras racha prolongada.
+ * - Salida SELL:
+ *   1. Take profit en Zona Morada (sobreextensión extrema > 28% y desaceleración).
+ *   2. Pérdida del soporte en Cero (Osc < -2% con precio < SMA200).
+ *   3. Death cross confirmada (cierre bajo SMA200 y Osc <= 0).
+ */
+export function evaluateStrategyMacroOscillator(candles, opts = {}) {
+  const fastPeriod = opts.fastPeriod ?? 50;
+  const slowPeriod = opts.slowPeriod ?? 200;
+  const greenZone = opts.greenZoneThreshold ?? -6.0;
+  const purpleZone = opts.purpleZoneThreshold ?? 28.0;
+  const zeroExit = opts.zeroExitThreshold ?? -2.0;
+  const fomoStreakDays = opts.fomoStreakDays ?? 85;
+  const correctionPct = opts.correctionPct ?? 0.15;
+  const emaWeekly = opts.bmsbEmaPeriod ?? 140;
+  const smaWeekly = opts.bmsbSmaPeriod ?? 147;
+
+  const { closes, highs, lows } = candles;
+  const n = closes ? closes.length : 0;
+  if (n < slowPeriod + 10) return 'HOLD';
+
+  const osc = calculateMacroOscillator(closes, fastPeriod, slowPeriod);
+  const currentOsc = osc[n - 1];
+  const prevOsc = osc[n - 2];
+  const prev2Osc = osc[n - 3];
+
+  if (currentOsc === null || prevOsc === null) return 'HOLD';
+
+  const currentPrice = closes[n - 1];
+  const smaSlow = smaLast(closes, slowPeriod);
+
+  // Bull Market Support Band
+  const { ema20w, sma21w } = calculateBullMarketSupportBand(closes, emaWeekly, smaWeekly);
+  const bmsbLow = Math.min(ema20w[n - 1] || smaSlow, sma21w[n - 1] || smaSlow);
+  const bmsbHigh = Math.max(ema20w[n - 1] || smaSlow, sma21w[n - 1] || smaSlow);
+
+  // Racha sin corrección >= 15%
+  const streaks = calculateCorrectionStreak(highs || closes, lows || closes, closes, correctionPct);
+  const currentStreak = streaks[n - 1];
+  const isOverextendedStreak = currentStreak >= fomoStreakDays;
+
+  // 1. Detección de Divergencia Alcista en Zona Verde
+  let isBullDiv = false;
+  if (currentOsc < greenZone) {
+    let lookbackMinOsc = Infinity;
+    let lookbackMinPrice = Infinity;
+    const lookbackStart = Math.max(0, n - 45);
+    const lookbackEnd = Math.max(0, n - 10);
+    const lowSeries = lows || closes;
+
+    for (let k = lookbackStart; k <= lookbackEnd; k++) {
+      if (osc[k] !== null) {
+        if (osc[k] < lookbackMinOsc) lookbackMinOsc = osc[k];
+        if (lowSeries[k] < lookbackMinPrice) lookbackMinPrice = lowSeries[k];
+      }
+    }
+
+    const currentLow = lowSeries[n - 1];
+    const priceNearOrLower = currentLow <= lookbackMinPrice * 1.04;
+    const oscHigher = currentOsc > lookbackMinOsc + 2.5;
+    const oscTurningUp = currentOsc > prevOsc && prevOsc >= (prev2Osc ?? prevOsc);
+
+    if (priceNearOrLower && oscHigher && oscTurningUp) {
+      isBullDiv = true;
+    }
+  }
+
+  // 2. Apoyo en Línea Cero durante tendencia alcista macro
+  const isZeroBounce = prevOsc >= -1.0 && prevOsc <= 3.5 && currentOsc > prevOsc && currentPrice > smaSlow;
+
+  // 3. Cruce alcista de Cero estándar
+  const isStandardCross = prevOsc < 0 && currentOsc >= 0;
+
+  // 4. Testeo de Bull Market Support Band
+  const isTouchingBMSB = (lows ? lows[n - 1] : currentPrice) <= bmsbHigh * 1.02 && currentPrice >= bmsbLow * 0.97;
+
+  // Evaluar condiciones de BUY
+  let canBuy = false;
+  if (isBullDiv) {
+    canBuy = true;
+  } else if (isZeroBounce) {
+    canBuy = true;
+  } else if (isStandardCross) {
+    if (!isOverextendedStreak || isTouchingBMSB) {
+      canBuy = true;
+    }
+  } else if (isOverextendedStreak && isTouchingBMSB && currentPrice > bmsbLow && currentOsc > 0 && currentPrice > smaSlow) {
+    canBuy = true;
+  }
+
+  // Evaluar condiciones de SELL / Salida
+  const isPurpleTakeProfit = currentOsc > purpleZone && currentOsc < prevOsc && prevOsc > (prev2Osc ?? prevOsc);
+  const isZeroLossExit = currentOsc < zeroExit && currentPrice < smaSlow;
+  const isDeathCross = prevOsc > 0 && currentOsc <= 0 && currentPrice < smaSlow;
+
+  if (isPurpleTakeProfit || isZeroLossExit || isDeathCross) {
+    return 'SELL';
+  }
+  if (canBuy) {
+    return 'BUY';
+  }
+  return 'HOLD';
+}
+

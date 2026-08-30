@@ -1,8 +1,8 @@
 import binance from './binanceService.js';
 import { dailyTrader, updateCircuitBreaker, computePortfolioEquity } from './shadowTrader.js';
 import telegramService from './telegramService.js';
-import { evaluateStrategySMA200, computeVolTargetWeight, btcRegimeOn, entriesAreFresh } from './indicators.js';
-import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, REGIME, ENTRY_FRESHNESS_HOURS, SIGNAL_MODE } from './config.js';
+import { evaluateStrategySMA200, evaluateStrategyMacroOscillator, computeVolTargetWeight, btcRegimeOn, entriesAreFresh } from './indicators.js';
+import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, REGIME, ENTRY_FRESHNESS_HOURS, SIGNAL_MODE, MACRO_OSCILLATOR } from './config.js';
 
 /**
  * BOT DIARIO — Market-timing de régimen SMA (estilo Faber). CANAL PARALELO al 15m.

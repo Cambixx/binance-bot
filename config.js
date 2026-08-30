@@ -225,5 +225,20 @@ export const SIGNAL_MODE = {
   notionalPerSignal: 1000,  // USDC por señal. Unidad de medida, no una decisión de riesgo.
 };
 
+// ─────────────────────────── Macro Golden/Death Oscillator & Anti-FOMO ───────────────────────────
+// Estrategia macro basada en el oscilador normalizado fast/slow, divergencias en zona verde,
+// apoyos en línea cero y control estadístico de rachas sin corrección (Video 1 & Video 2).
+export const MACRO_OSCILLATOR = {
+  fastPeriod: 50,              // Periodo SMA rápida (50 días)
+  slowPeriod: 200,             // Periodo SMA lenta (200 días)
+  greenZoneThreshold: -6.0,    // Umbral de acumulación extrema / descuento (%)
+  purpleZoneThreshold: 28.0,   // Umbral de sobreextensión extrema / Take Profit (%)
+  zeroExitThreshold: -2.0,     // Pérdida estructural del nivel cero (%)
+  fomoStreakDays: 85,          // Límite de días sin corrección >=15% antes de activar Anti-FOMO
+  correctionPct: 0.15,         // Magnitud mínima de corrección (15%) para resetear el streak
+  bmsbEmaPeriod: 140,          // EMA 20 semanas (140 días)
+  bmsbSmaPeriod: 147,          // SMA 21 semanas (147 días)
+};
+
 // ─────────────────────────── Capital ───────────────────────────
 export const INITIAL_BALANCE = 5000; // Saldo virtual inicial (shadow mode)

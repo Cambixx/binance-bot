@@ -4,6 +4,7 @@ import {
   evaluateStrategyV4A, evaluateStrategyV4B, evaluateStrategyV4C,
   evaluateStrategyV5, evaluateStrategyV6,
   evaluateStrategySMA200, evaluateStrategySupertrendDaily, evaluateStrategyDonchian,
+  evaluateStrategyMacroOscillator,
   calculateATR, computeVolTargetWeight, computeVolTargetWeightConditional, periodsPerYearFor,
   shortEntryAllowed, dailyVol, btcRegimeOn
 } from './indicators.js';
@@ -21,6 +22,7 @@ export const STRATEGY_NAMES = {
   '4A': 'V4-A (Supertrend+Chandelier)', '4B': 'V4-B (V3+ATR-exits)', '4C': 'V4-C (V3+RegimeGate)',
   '5': 'V5 (Trend-rider)', '6': 'V6 (Adaptive SuperTrend)',
   'SMA200': 'SMA regime (Faber, diaria)', 'STDAY': 'SuperTrend diario', 'DONCHIAN': 'Donchian 55/20 (diaria)',
+  'MACRO_OSC': 'Oscilador Anticipado + Anti-FOMO (Videos 1 & 2)', '7': 'V7 (Macro Oscillator)', 'V7': 'V7 (Macro Oscillator)',
 };
 
 export function strategyName(v) {
@@ -370,6 +372,9 @@ class BacktestEngine {
         case 'SMA200':   signal = evaluateStrategySMA200(buf, this.regimeOpts); break;
         case 'STDAY':    signal = evaluateStrategySupertrendDaily(buf, this.regimeOpts); break;
         case 'DONCHIAN': signal = evaluateStrategyDonchian(buf, this.regimeOpts); break;
+        case 'MACRO_OSC':
+        case '7':
+        case 'V7':       signal = evaluateStrategyMacroOscillator(buf, this.regimeOpts); break;
         default:   signal = evaluateStrategyV3(buf);
       }
 

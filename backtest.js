@@ -2,7 +2,7 @@ import fs from 'fs';
 import BacktestEngine, { strategyName } from './backtestEngine.js';
 import binance from './binanceService.js';
 import { exec } from 'child_process';
-import { isBlacklisted, BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT } from './config.js';
+import { isBlacklisted, BLACKLIST, STRATEGY_OPTS, COSTS, SMA_HYSTERESIS_BAND, VOLTARGET, SMA_PERIOD, LONGSHORT, MACRO_OSCILLATOR } from './config.js';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -17,12 +17,15 @@ async function main() {
   else if (args.includes('--v4a')) strategyVersion = '4A';
   else if (args.includes('--v4b')) strategyVersion = '4B';
   else if (args.includes('--v4c')) strategyVersion = '4C';
+  else if (args.includes('--v5')) strategyVersion = '5';
+  else if (args.includes('--v6')) strategyVersion = '6';
+  else if (args.includes('--v7') || args.includes('--macro-osc')) strategyVersion = 'MACRO_OSC';
   else if (args.includes('--sma200')) strategyVersion = 'SMA200';
   else if (args.includes('--stday')) strategyVersion = 'STDAY';
   else if (args.includes('--donchian')) strategyVersion = 'DONCHIAN';
 
   // Familia diaria (baja frecuencia): salida por señal, no TP/SL
-  const isDaily = ['SMA200', 'STDAY', 'DONCHIAN'].includes(strategyVersion);
+  const isDaily = ['SMA200', 'STDAY', 'DONCHIAN', 'MACRO_OSC'].includes(strategyVersion);
 
   // Timeframe: --interval=, o 1d automático para la familia diaria, o 15m por defecto
   const intervalArg = args.find(a => a.startsWith('--interval='));
@@ -94,6 +97,7 @@ async function main() {
 
   // Defaults V4C-COMBO centralizados en config.js (paridad bot.js)
   const regimeOpts = { ...STRATEGY_OPTS };
+  if (strategyVersion === 'MACRO_OSC') Object.assign(regimeOpts, MACRO_OSCILLATOR);
   if (chopArg) regimeOpts.chopMax = parseFloat(chopArg.split('=')[1]);
   if (bbwArg) regimeOpts.bbwPctMin = parseFloat(bbwArg.split('=')[1]);
 
