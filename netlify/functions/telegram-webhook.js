@@ -141,7 +141,7 @@ export default async (req) => {
       if (last.length === 0) {
         await telegramService.sendMessage('🧾 <b>OPERACIONES CERRADAS</b>\n\n<i>Aún no hay trades cerrados.</i>');
       } else {
-        const reasonTxt = { TAKE_PROFIT: 'TP', STOP_LOSS: 'SL', TRAILING_STOP: 'Trail', SIGNAL: 'Señal', END_OF_BACKTEST: 'Fin', MANUAL_CLEANUP: 'Limpieza' };
+        const reasonTxt = { TAKE_PROFIT: 'TP', STOP_LOSS: 'SL', TRAILING_STOP: 'Trail', SIGNAL: 'Señal', END_OF_BACKTEST: 'Fin', MANUAL_CLEANUP: 'Limpieza', MANUAL_CLOSE: 'Manual' };
         const lines = last.map(t => {
           const p = Number(t.profitUSDC) || 0;
           const ic = p >= 0 ? '🟢' : '🔴';
@@ -150,6 +150,93 @@ export default async (req) => {
           return `${ic} ${d} ${side}<b>#${tag(t.symbol)}</b> ${p >= 0 ? '+' : ''}${p.toFixed(2)} USDC · ${esc(reasonTxt[t.reason] || t.reason)}`;
         });
         await telegramService.sendMessage(`🧾 <b>ÚLTIMAS ${last.length} OPERACIONES CERRADAS</b>\n\n${lines.join('\n')}`);
+      }
+    }
+
+    // ── /cerrar — cierre DISCRECIONAL de posiciones (2026-09-05) ─────────────────────────
+    // Primera orden del webhook que MUTA estado, así que:
+    //  · exige confirmación explícita ("si") — un dedo torpe no puede liquidar la cartera;
+    //  · usa el patrón de sesión, cuyo commit es CONDICIONAL (onlyIfMatch): si el cron escribe a
+    //    la vez, el commit falla en vez de pisarlo, y aquí se traduce a un aviso para reintentar;
+    //  · marca los cierres como MANUAL_CLOSE → excluidos de winRate/PF (ver shadowTrader).
+    else if (text === '/cerrar' || text.startsWith('/cerrar ') || text === '/close' || text.startsWith('/close ')) {
+      const parts = text.split(/\s+/).filter(Boolean);
+      const target = (parts[1] || '').toUpperCase();      // símbolo, "TODO"/"ALL", o vacío
+      const confirmed = ['SI', 'SÍ', 'YES', 'CONFIRMAR'].includes((parts[2] || '').toUpperCase());
+
+      // Inventario: qué hay abierto y en qué canal.
+      const found = [];
+      for (const ch of channels) {
+        const state = await ch.trader.getFullState();
+        for (const sym of Object.keys(state.openPositions)) found.push({ ch, sym, pos: state.openPositions[sym] });
+      }
+
+      if (found.length === 0) {
+        await telegramService.sendMessage('📌 <b>CERRAR</b>\n\n<i>No hay posiciones abiertas.</i>');
+      } else if (!target) {
+        // Sin argumento: NO se cierra nada. Solo se muestra el inventario y cómo usarlo.
+        const lines = found.map(f => `• <b>#${tag(f.sym)}</b> · ${esc(f.ch.title)}`);
+        await telegramService.sendMessage(
+          `📌 <b>CERRAR POSICIONES</b>\n\n${lines.join('\n')}\n\n` +
+          `<b>Uso:</b>\n· <code>/cerrar SOL</code> — vista previa de esa moneda\n` +
+          `· <code>/cerrar SOL si</code> — cerrar de verdad\n· <code>/cerrar todo si</code> — cerrar todas\n\n` +
+          `<i>Los cierres manuales se registran como señales truncadas: cuentan el trabajo del bot, pero no el win rate de la estrategia.</i>`
+        );
+      } else {
+        const isAll = target === 'TODO' || target === 'ALL' || target === 'TODAS';
+        // Match por base del par: el usuario escribe "SOL", el estado guarda "SOLUSDC".
+        const sel = isAll ? found : found.filter(f => f.sym === target || f.sym.replace(/USDC$|USDT$/, '') === target);
+
+        if (sel.length === 0) {
+          await telegramService.sendMessage(`❓ <b>${esc(target)}</b> no está abierta en ningún canal.\n\nUsa <code>/cerrar</code> para ver la lista.`);
+        } else {
+          const prices = await binance.getPrices([...new Set(sel.map(f => f.sym))]);
+          const fmt = (f) => {
+            const entry = f.pos.entryPrice ?? f.pos.buyPrice;
+            const mkt = prices[f.sym] || entry;
+            const pnl = (f.pos.side === 'short') ? f.pos.amount * (entry - mkt) : f.pos.amount * mkt - f.pos.investedUSDC;
+            const pct = f.pos.investedUSDC ? (pnl / f.pos.investedUSDC) * 100 : 0;
+            return { pnl, txt: `${pnl >= 0 ? '🟢' : '🔴'} <b>#${tag(f.sym)}</b> · ${esc(f.ch.title)}\n   ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDC (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` };
+          };
+
+          if (!confirmed) {
+            // VISTA PREVIA. No toca nada.
+            const rows = sel.map(fmt);
+            const tot = rows.reduce((a, r) => a + r.pnl, 0);
+            await telegramService.sendMessage(
+              `⚠️ <b>CONFIRMA EL CIERRE</b>\n\nVas a cerrar <b>${sel.length}</b> posición(es):\n\n` +
+              `${rows.map(r => r.txt).join('\n')}\n\n` +
+              `<b>P&L total:</b> ${tot >= 0 ? '+' : ''}${tot.toFixed(2)} USDC\n\n` +
+              `Se registrarán como <b>señales truncadas</b>: la entrada la generó el bot y queda\n` +
+              `acreditada, pero como la salida la eliges tú NO entran en el win rate de la estrategia.\n\n` +
+              `👉 Confirma con <code>/cerrar ${esc(target.toLowerCase())} si</code>`
+            );
+          } else {
+            // EJECUCIÓN: una sesión por canal (una lectura + una escritura condicional).
+            const done = [], failed = [];
+            for (const ch of channels) {
+              const mine = sel.filter(f => f.ch === ch);
+              if (mine.length === 0) continue;
+              try {
+                const session = await ch.trader.beginSession();
+                let n = 0;
+                for (const f of mine) {
+                  const px = prices[f.sym];
+                  if (!(px > 0)) { failed.push(`${tag(f.sym)} (${esc(ch.title)}): sin precio`); continue; }
+                  if (ch.trader.applySell(session, f.sym, px, 'MANUAL_CLOSE')) { done.push(f.sym); n++; }
+                }
+                if (n > 0) await ch.trader.commitSession(session);
+              } catch (e) {
+                // commitSession lanza si otra invocación (el cron) escribió entremedias.
+                failed.push(`${esc(ch.title)}: ${esc(e.message)}`);
+              }
+            }
+            const parts2 = [];
+            if (done.length) parts2.push(`✅ Cerradas <b>${done.length}</b> posición(es).\n<i>Registradas como señales truncadas — mira /status.</i>`);
+            if (failed.length) parts2.push(`⚠️ No se pudo cerrar:\n${failed.map(x => `• ${x}`).join('\n')}\n<i>Si fue un conflicto de escritura, el cron estaba guardando: reintenta en unos segundos.</i>`);
+            await telegramService.sendMessage(`🔚 <b>CIERRE MANUAL</b>\n\n${parts2.join('\n\n')}`);
+          }
+        }
       }
     }
 

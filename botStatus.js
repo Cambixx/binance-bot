@@ -22,9 +22,16 @@ export async function channelStatusBlock({ trader, title }) {
   const s = await trader.getStats(prices);
   const icon = parseFloat(s.totalProfitUSDC) >= 0 ? '🟢' : '🔴';
   const mktNote = s.pricedAtMarket ? '' : ' <i>(a coste)</i>';
+  // Las señales TRUNCADAS (entrada del bot, salida manual del dueño) se muestran en su propia
+  // línea: registran el trabajo del bot sin mezclarse con el win rate de la estrategia, que solo
+  // cuenta round-trips donde el bot decidió AMBOS extremos.
+  const truncLine = s.truncatedTrades > 0
+    ? `\n✋ Truncadas por ti: ${s.truncatedTrades} (WR ${s.truncatedWinRate}, ${Number(s.truncatedPnLUSDC) >= 0 ? '+' : ''}${s.truncatedPnLUSDC} USDC) — fuera del WR de estrategia`
+    : '';
   return `<b>━━ ${esc(title)} ━━</b>\n` +
     `Equity: ${s.currentTotalEquity} USDC${mktNote} (inicial ${s.initialBalance})\n` +
     `Disponible: ${s.availableBalance} | Invertido: ${s.investedEquity}\n` +
-    `Posiciones: ${s.openPositionsCount} | Trades: ${s.totalTrades} | WR: ${s.winRate}\n` +
+    `Posiciones: ${s.openPositionsCount} | Trades: ${s.totalTrades}\n` +
+    `🤖 Señales completas: ${s.signalTrades} (WR ${s.winRate})${truncLine}\n` +
     `P&L: realizado ${s.realizedPnLUSDC} + latente ${s.unrealizedPnLUSDC} = ${icon} <b>${s.totalProfitUSDC} USDC</b>`;
 }

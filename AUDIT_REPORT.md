@@ -964,3 +964,40 @@ destruido se regeneró. Afectaba a la reproducibilidad del archivo de auditoría
 Ninguna regla de trading. `MACRO_OSC` sigue sin cablear (y su import muerto en `dailyBot.js` queda
 señalado); `exitSmaPeriod` queda implementado y **apagado**, como `longStopPct` y
 `rotationDailyRiskOff`: el valor entregado es el número medido, no la opción. Tests: **93 en verde** (3 nuevos cubren la salida asimétrica).
+
+---
+
+## 19. `/cerrar` — cierre discrecional desde Telegram (2026-09-05)
+
+Primer comando del webhook que **muta estado** (los demás eran de consulta). Petición del dueño:
+poder cerrar posiciones a mano, como haría operando de verdad.
+
+**Decisión de contabilidad (la que importa), refinada tras la objeción del dueño:** la primera
+versión metía `MANUAL_CLOSE` en `ADMIN_REASONS`, junto a `MANUAL_CLEANUP`. Era demasiado tosco y la
+objeción es correcta: **la entrada SÍ la generó el bot**; lo que no es del bot es la salida. Un
+cierre manual no es una no-señal, es una **señal TRUNCADA**. Ahora hay tres categorías:
+
+| categoría | quién decide entrada / salida | ¿cuenta en `winRate`/PF? | ¿acredita al bot? |
+|---|---|---|---|
+| **Señal completa** (`SIGNAL`, `TAKE_PROFIT`, `STOP_LOSS`, `TRAILING_STOP`) | bot / bot | **Sí** — es el único material del perfil honesto | sí |
+| **Truncada** (`MANUAL_CLOSE`) | **bot** / dueño | **No** | **Sí**, en su propio cajón |
+| **Administrativa** (`MANUAL_CLEANUP`, `END_OF_BACKTEST`) | — / mantenimiento | No | No |
+
+`getStats` expone `truncatedTrades`, `truncatedWins`, `truncatedWinRate`, `truncatedPnLUSDC` y
+`botEntriesClosed` (= completas + truncadas), y `/status` las muestra en su propia línea. Así el
+trabajo de generación de señal queda **registrado y visible** sin contaminar el win rate con una
+decisión humana — descartarlo habría borrado trabajo real del bot; mezclarlo habría inflado la
+métrica que el MODO SEÑAL (§16) existe para medir (WR 26,58 %, payoff 5,45:1).
+
+**Lo que se pierde igualmente, y conviene no olvidar:** de una señal truncada se sabe lo que rindió
+hasta el cierre, pero **nunca** qué habría rendido la salida de la estrategia. El repo ya midió esa
+asimetría por el lado del backtest (`truncationCounterfactual`, §14.6): cortar ganadores sale caro.
+Una cartera con muchas truncadas tiene un `winRate` estadísticamente más pobre, no por peor
+estrategia sino por menor muestra.
+
+**Salvaguardas:** confirmación explícita obligatoria (`/cerrar SOL si`) — sin ella solo hay vista
+previa con el P&L de cada posición; el inventario (`/cerrar` a secas) no toca nada; y la escritura
+usa el patrón de sesión, cuyo commit condicional (`onlyIfMatch`) hace que un choque con el cron
+falle en vez de pisarlo, avisando al usuario de que reintente. Alcance = `activeChannels()`.
+
+Tests: **96 en verde** (3 fijan los invariantes: el cierre manual mueve la caja, se registra como truncada, y NO se confunde con una limpieza administrativa).

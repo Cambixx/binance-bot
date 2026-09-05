@@ -271,3 +271,64 @@ test('shortFundingCost: funding real positivo = el corto COBRA (coste negativo);
   const flat = engine.shortFundingCost('BBBUSDC', 0, 10 * 86400000, 1000);
   assert.ok(Math.abs(flat - 3) < 1e-9, `coste flat=${flat}`);
 });
+
+// ───────────────── Cierre manual /cerrar (MANUAL_CLOSE) — 2026-09-05 ─────────────────
+// El invariante que protege la medición del MODO SEÑAL: un cierre discrecional mueve la CAJA
+// pero NO el marcador de la estrategia. Si contase para winRate/PF, cerrar ganadores a mano
+// inflaría justo la métrica que este bot existe para medir.
+
+test('applySell con MANUAL_CLOSE cierra la posición y acredita la caja', () => {
+  const t = new ShadowTrader();
+  const s = fakeSession(5000);
+  t.applyBuy(s, 'BTCUSDC', 100, { signalMode: false, sizeFraction: 0.2 });
+  const balTrasCompra = s.state.balanceUSDC;
+  const ok = t.applySell(s, 'BTCUSDC', 120, 'MANUAL_CLOSE');
+  assert.equal(ok, true);
+  assert.equal(s.state.openPositions['BTCUSDC'], undefined, 'la posición debe desaparecer');
+  assert.equal(s.state.tradeHistory.at(-1).reason, 'MANUAL_CLOSE');
+  assert.ok(s.state.balanceUSDC > balTrasCompra, 'la venta acredita la caja');
+});
+
+test('MANUAL_CLOSE: fuera del winRate de estrategia, pero REGISTRADO como truncada', async () => {
+  const t = new ShadowTrader();
+  // Historial: una señal completa perdedora y un cierre manual ganador. Si el manual contase
+  // como estrategia, el WR saldría 50%; el correcto es 0% sobre 1 sola señal completa.
+  t._loadState = async () => ({
+    balanceUSDC: 5100, openPositions: {}, cooldowns: {},
+    tradeHistory: [
+      { symbol: 'AAAUSDC', reason: 'SIGNAL', profitUSDC: -100 },
+      { symbol: 'BBBUSDC', reason: 'MANUAL_CLOSE', profitUSDC: +200 },
+    ],
+  });
+  const s = await t.getStats({});
+  // 1) El win rate de la ESTRATEGIA no se contamina.
+  assert.equal(s.signalTrades, 1, 'solo la señal completa cuenta como estrategia');
+  assert.equal(s.signalWins, 0);
+  assert.equal(s.winRate, '0.00%', 'el cierre manual NO puede inflar el win rate');
+  // 2) Pero el trabajo del bot SÍ queda registrado, en su propio cajón.
+  assert.equal(s.truncatedTrades, 1, 'la entrada la generó el bot: se registra como truncada');
+  assert.equal(s.truncatedWins, 1);
+  assert.equal(s.truncatedWinRate, '100.00%');
+  assert.equal(s.truncatedPnLUSDC, '200.00');
+  assert.equal(s.botEntriesClosed, 2, 'ambas entradas las generó el bot');
+  // 3) La caja es la caja.
+  assert.equal(s.totalTrades, 2);
+  assert.equal(s.realizedPnLUSDC, '100.00', '+200 −100 = +100');
+});
+
+test('MANUAL_CLEANUP (mantenimiento) NO se registra como trabajo del bot; MANUAL_CLOSE sí', async () => {
+  // Es la distinción que motivó el refinamiento: antes ambos caían en el mismo saco.
+  const t = new ShadowTrader();
+  t._loadState = async () => ({
+    balanceUSDC: 5000, openPositions: {}, cooldowns: {},
+    tradeHistory: [
+      { symbol: 'AAAUSDC', reason: 'MANUAL_CLOSE', profitUSDC: +50 },
+      { symbol: 'BBBUSDC', reason: 'MANUAL_CLEANUP', profitUSDC: +50 },
+    ],
+  });
+  const s = await t.getStats({});
+  assert.equal(s.truncatedTrades, 1, 'solo el cierre manual del dueño es una señal truncada');
+  assert.equal(s.signalTrades, 0, 'ninguna de las dos es una señal completa');
+  assert.equal(s.botEntriesClosed, 1, 'la limpieza no acredita trabajo del bot');
+  assert.equal(s.realizedPnLUSDC, '100.00', 'las dos mueven la caja igualmente');
+});

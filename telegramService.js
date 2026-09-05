@@ -87,6 +87,7 @@ export const BOT_COMMANDS = [
   { command: 'portfolio', description: '🌐 Resumen consolidado de la cartera global' },
   { command: 'posiciones', description: '📌 Posiciones abiertas con P&L latente' },
   { command: 'trades', description: '🧾 Últimas operaciones cerradas' },
+  { command: 'cerrar', description: '🔚 Cerrar posiciones a mano (pide confirmación)' },
   { command: 'help', description: '❓ Ayuda y comandos disponibles' },
 ];
 

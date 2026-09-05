@@ -124,25 +124,42 @@ class ShadowTrader {
   async getStats(currentPrices = {}) {
     const state = await this._loadState();
 
-    // Métricas de ESTRATEGIA vs administrativas (auditoría 2026-07-03 #1): los cierres
-    // no-señal (MANUAL_CLEANUP, limpiezas de estado) mueven el cash real pero NO son señales
-    // → se excluyen de winRate/PF y del conteo del gate de promoción. realizedPnL sí los
-    // incluye (la caja es la caja).
+    // TRES categorías de cierre, no dos (refinamiento 2026-09-05). La distinción importa porque
+    // un cierre manual NO es lo mismo que una limpieza de estado:
+    //
+    //  1. SEÑAL COMPLETA — el bot decidió la entrada Y la salida. Es el único material del que
+    //     sale `winRate`/PF: el perfil honesto de la estrategia (auditoría 2026-07-03 #1).
+    //  2. TRUNCADA (`MANUAL_CLOSE`) — el bot generó la entrada, el dueño eligió la salida desde
+    //     /cerrar. El trabajo de GENERAR la señal sí lo hizo el bot, así que se cuenta y se
+    //     reporta... pero en su propio cajón: mezclarla con (1) contaminaría el win rate con una
+    //     decisión humana, y descartarla borraría trabajo real del bot. Se sabe lo que rindió
+    //     hasta el cierre; NO se sabe qué habría rendido la salida de la estrategia.
+    //  3. ADMINISTRATIVA (`MANUAL_CLEANUP`, `END_OF_BACKTEST`) — mantenimiento, ningún mérito
+    //     del bot. Fuera de todo marcador.
+    //
+    // `realizedPnL` incluye las tres: la caja es la caja.
+    const TRUNCATED_REASONS = new Set(['MANUAL_CLOSE']);
     const ADMIN_REASONS = new Set(['MANUAL_CLEANUP', 'END_OF_BACKTEST']);
     const totalTrades = state.tradeHistory.length;
     let winningTrades = 0;
     let realizedPnL = 0;
     let signalTrades = 0, signalWins = 0;
+    let truncatedTrades = 0, truncatedWins = 0, truncatedPnL = 0;
     state.tradeHistory.forEach(trade => {
       const p = Number(trade.profitUSDC) || 0;
       realizedPnL += p;
       if (p > 0) winningTrades++;
-      if (!ADMIN_REASONS.has(trade.reason)) {
+      if (TRUNCATED_REASONS.has(trade.reason)) {
+        truncatedTrades++;
+        truncatedPnL += p;
+        if (p > 0) truncatedWins++;
+      } else if (!ADMIN_REASONS.has(trade.reason)) {
         signalTrades++;
         if (p > 0) signalWins++;
       }
     });
     const winRate = signalTrades > 0 ? ((signalWins / signalTrades) * 100).toFixed(2) : '0.00';
+    const truncatedWinRate = truncatedTrades > 0 ? ((truncatedWins / truncatedTrades) * 100).toFixed(2) : '0.00';
 
     let investedEquity = 0;
     let unrealizedPnL = 0;
@@ -187,6 +204,14 @@ class ShadowTrader {
       winningTrades,
       signalTrades,                                    // cierres de estrategia (base del gate de promoción)
       signalWins,
+      // Señales TRUNCADAS: entrada del bot, salida elegida por el dueño (/cerrar). Se reportan
+      // aparte para que el trabajo del bot quede registrado sin contaminar el win rate.
+      truncatedTrades,
+      truncatedWins,
+      truncatedWinRate: `${truncatedWinRate}%`,
+      truncatedPnLUSDC: truncatedPnL.toFixed(2),
+      // Entradas generadas por el bot y ya cerradas, se cerrasen como se cerrasen.
+      botEntriesClosed: signalTrades + truncatedTrades,
       openPositionsCount: Object.keys(state.openPositions).length
     };
   }
@@ -395,7 +420,7 @@ class ShadowTrader {
     const isShort = position.side === 'short';
     const icon = profitUSDC >= 0 ? '🎯' : '🛑';
     const closeWord = isShort ? 'CIERRE DE CORTO (cubrir)' : 'SEÑAL DE CIERRE';
-    const motivos = { TAKE_PROFIT: 'Take Profit', STOP_LOSS: 'Stop Loss', TRAILING_STOP: 'Trailing Stop', SIGNAL: 'Señal' };
+    const motivos = { TAKE_PROFIT: 'Take Profit', STOP_LOSS: 'Stop Loss', TRAILING_STOP: 'Trailing Stop', SIGNAL: 'Señal', MANUAL_CLOSE: 'Cierre manual (señal truncada)' };
     const heldH = ((Date.now() - new Date(position.timestamp).getTime()) / 3600000).toFixed(1);
     const tag = telegramService.escape(symbol.replace('USDC', ''));
     session.notifications.push(
@@ -405,7 +430,9 @@ class ShadowTrader {
       `<b>Motivo:</b> ${telegramService.escape(motivos[reason] || reason)}\n` +
       `<b>Duración:</b> ${heldH} h\n` +
       `<b>Resultado (neto de costes):</b> ${profitUSDC > 0 ? '+' : ''}${profitUSDC.toFixed(2)} USDC (${profitPercentage.toFixed(2)}%)\n\n` +
-      `<i>Si replicaste la operación manual, cierra ahora.</i>`
+      (reason === 'MANUAL_CLOSE'
+        ? `<i>Cierre ordenado por ti. La señal del bot queda acreditada como truncada; el win rate de la estrategia no se toca.</i>`
+        : `<i>Si replicaste la operación manual, cierra ahora.</i>`)
     );
 
     console.log(`🔴 [${this.label}] ${isShort ? 'COVER' : 'SELL'} ${symbol} a ${price} → ${profitUSDC > 0 ? '+' : ''}${profitUSDC.toFixed(2)} USDC (${profitPercentage.toFixed(2)}%) | saldo ${state.balanceUSDC.toFixed(2)}`);
