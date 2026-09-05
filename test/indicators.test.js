@@ -137,3 +137,39 @@ test('rotación: top-N por retorno con gate de momentum absoluto y BTC', () => {
   assert.equal(off.riskOff, true);
   assert.deepEqual(off.targets, []);
 });
+
+// ── Salida asimétrica `exitSmaPeriod` (candidata 2026-09-05, §18.2) ───────────────────────
+// Serie: rampa larga y luego un retroceso que pierde la SMA rápida pero NO la lenta. Es el
+// escenario donde las dos formulaciones se separan; si no se separan aquí, el test no prueba nada.
+function rampWithPullback() {
+  const up = Array.from({ length: 200 }, (_, i) => 100 + i);   // 100 → 299
+  const dip = Array.from({ length: 12 }, () => 250);           // < SMA50, todavía > SMA150
+  return [...up, ...dip];
+}
+
+test('exitSmaPeriod: sin la opción, el comportamiento histórico es EXACTO', () => {
+  const closes = rampWithPullback();
+  // La referencia es la misma llamada sin `exitSmaPeriod`: debe coincidir señal a señal.
+  for (const band of [0, 0.0075]) {
+    assert.equal(
+      evaluateStrategySMA200({ closes }, { smaPeriod: 150, band, exitSmaPeriod: undefined }),
+      evaluateStrategySMA200({ closes }, { smaPeriod: 150, band }),
+      `band=${band}: la opción ausente no puede alterar la señal`
+    );
+  }
+});
+
+test('exitSmaPeriod: sale al perder la SMA rápida aunque siga sobre la lenta', () => {
+  const closes = rampWithPullback();
+  // Sanidad del fixture: sin salida rápida el precio sigue siendo alcista (no vende).
+  assert.notEqual(evaluateStrategySMA200({ closes }, { smaPeriod: 150 }), 'SELL');
+  // Con salida rápida a 50, el retroceso sí corta.
+  assert.equal(evaluateStrategySMA200({ closes }, { smaPeriod: 150, exitSmaPeriod: 50 }), 'SELL');
+});
+
+test('exitSmaPeriod: para entrar exige estar por encima de AMBAS (evita el churn)', () => {
+  // Precio justo por encima de la lenta pero por debajo de la rápida → ni BUY ni recompra.
+  const closes = rampWithPullback();
+  const sig = evaluateStrategySMA200({ closes }, { smaPeriod: 150, exitSmaPeriod: 50 });
+  assert.notEqual(sig, 'BUY', 'no puede comprar por debajo de la SMA rápida');
+});

@@ -29,7 +29,7 @@ import fs from 'fs';
 import BacktestEngine from './backtestEngine.js';
 import binance from './binanceService.js';
 import { runWalkForward, lsBaseEngineOpts } from './wfcore.js';
-import { isBlacklisted } from './config.js';
+import { isBlacklisted, MACRO_OSCILLATOR, SMA_PERIOD, STRATEGY_OPTS } from './config.js';
 
 const args = process.argv.slice(2);
 const getNum = (p, d) => { const a = args.find(x => x.startsWith(p)); return a ? parseFloat(a.split('=')[1]) : d; };
@@ -100,6 +100,48 @@ const TOURNAMENTS = {
     { name: 'LONGSTOP 20%', opts: { ...BUF, ...BASE_GATE, longStopPct: 0.20, longStopCooldown: 5 } },
     { name: 'LONGSTOP 15%', opts: { ...BUF, ...BASE_GATE, longStopPct: 0.15, longStopCooldown: 5 } },
   ],
+  // ══ ESTRATEGIA MACRO_OSC (V7) — REJILLA PRE-REGISTRADA 2026-09-05, antes de correr nada ══
+  // POR QUÉ ESTA CANDIDATA Y NO OTRA: está implementada, testeada y cableada al motor desde el
+  // commit `abfa3691`, pero NUNCA medida — no aparece en AUDIT_REPORT.md y no tiene resultados
+  // archivados. Además ataca la debilidad que la propia auditoría dejó identificada (§17: el
+  // riesgo del diseño actual no es la falta de stop, es el LAG de la SMA150): su salida
+  // `isPurpleTakeProfit` corta por sobreextensión del oscilador, muy por delante del cruce.
+  //
+  // HIPÓTESIS DECLARADA: la salida temprana debería subir el Calmar reduciendo el recorrido
+  // pico→SMA. RIESGO CONOCIDO Y DECLARADO: salir antes en un trend-follower suele cortar las
+  // colas derechas que SON el edge (medido ya en este repo con Donchian §14.4: WR 19→47 % pero
+  // ROI −60 %). PREDICCIÓN: ROI mediano BAJA; el veredicto depende de si el Calmar compensa.
+  //
+  // CONTROL DE MESETA: se barre purpleZoneThreshold (22/28/34). Si solo el default gana, es un
+  // pico y no se adopta aunque pase el gate ("meseta, no pico", regla de la casa).
+  //
+  // ⚠️ PARIDAD DE ARRANQUE: MACRO_OSC necesita slowPeriod+10=210 velas (y BMSB 147). Se fija el
+  // MISMO bufferSize/minCandles a TODAS las variantes, baseline incluida: si el baseline
+  // arrancara antes, la comparación mediría fechas de inicio distintas, no estrategias.
+  strategy: [
+    { name: 'baseline SMA150', opts: { bufferSize: 310, minCandles: 220, ...BASE_GATE } },
+    { name: 'MACRO_OSC p28 (def)', opts: { bufferSize: 310, minCandles: 220, ...BASE_GATE,
+      strategyVersion: 'MACRO_OSC', regimeOpts: { ...MACRO_OSCILLATOR } } },
+    { name: 'MACRO_OSC p22', opts: { bufferSize: 310, minCandles: 220, ...BASE_GATE,
+      strategyVersion: 'MACRO_OSC', regimeOpts: { ...MACRO_OSCILLATOR, purpleZoneThreshold: 22.0 } } },
+    { name: 'MACRO_OSC p34', opts: { bufferSize: 310, minCandles: 220, ...BASE_GATE,
+      strategyVersion: 'MACRO_OSC', regimeOpts: { ...MACRO_OSCILLATOR, purpleZoneThreshold: 34.0 } } },
+  ],
+  // ══ SALIDA ASIMÉTRICA (SMA rápida) — REJILLA PRE-REGISTRADA 2026-09-05 ══
+  // Ataca DIRECTAMENTE la debilidad de §17: el lag de la SMA150 en la SALIDA. La entrada (filtro
+  // de régimen) no se toca; solo se acelera el momento de cerrar. Es el experimento que DESCOMPONE
+  // la pregunta que MACRO_OSC dejó confundida (allí cambiaban entrada y salida a la vez).
+  //
+  // PREDICCIÓN DECLARADA: salir antes reduce el giveback pico→salida (mejor peor-fold) pero corta
+  // la cola derecha y multiplica el turnover (cada round-trip paga 0,30 %). Dado el precedente
+  // Donchian (§14.4) y MACRO_OSC, se espera ROI↓ y Δ Calmar ≈ 0 o negativa → NO adoptable.
+  // CONTROL DE MESETA: 50/75/100. Un ganador aislado entre dos perdedoras es un pico → no se adopta.
+  fastexit: [
+    { name: 'baseline (salida 150)', opts: { ...BUF, ...BASE_GATE } },
+    { name: 'SALIDA SMA100', opts: { ...BUF, ...BASE_GATE, regimeOpts: { ...STRATEGY_OPTS, smaPeriod: SMA_PERIOD, band: 0, exitSmaPeriod: 100 } } },
+    { name: 'SALIDA SMA75', opts: { ...BUF, ...BASE_GATE, regimeOpts: { ...STRATEGY_OPTS, smaPeriod: SMA_PERIOD, band: 0, exitSmaPeriod: 75 } } },
+    { name: 'SALIDA SMA50', opts: { ...BUF, ...BASE_GATE, regimeOpts: { ...STRATEGY_OPTS, smaPeriod: SMA_PERIOD, band: 0, exitSmaPeriod: 50 } } },
+  ],
   circuitbreaker: [
     { name: 'baseline SIN cb', opts: { ...BUF, ...BASE_GATE, portfolioCircuitBreaker: null } },
     { name: 'CB 12% / 48h', opts: { ...BUF, ...BASE_GATE } },
@@ -116,6 +158,14 @@ function mulberry32(a) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** Huella corta y determinista de un universo, para no pisar archivos entre muestras. */
+function fingerprint(syms) {
+  const key = [...syms].sort().join(',');
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36).slice(0, 6);
 }
 
 /** K permutaciones deterministas del orden de símbolos (la 1ª siempre es la identidad). */
@@ -261,7 +311,15 @@ async function main() {
   console.error('Criterio: P(mejora media > 0) ≥ 0,80 por bootstrap de clúster de fold, Y peor fold no peor.');
   console.error('El IQR se reporta pero NO veta: con ~7 folds no es estimable de forma fiable.');
 
-  const out = `robustgate-${TOURNAMENT}-${SYMBOLS[0].endsWith('USDT') ? 'usdt' : 'usdc'}${LONG_ONLY ? '-longonly' : ''}.json`;
+  // ⚠️ Defecto corregido 2026-09-05: el nombre solo miraba la MONEDA de cotización del primer
+  // símbolo, así que dos universos distintos en la misma divisa escribían el MISMO fichero y el
+  // segundo borraba al primero sin avisar. Se detectó al correr `fastexit` sobre un universo
+  // disjunto: sobrescribió el resultado de large-caps. Ahora, si el universo no es la cesta por
+  // defecto, se añade una huella determinista para que cada muestra conserve su archivo.
+  const quote = SYMBOLS[0].endsWith('USDT') ? 'usdt' : 'usdc';
+  const isDefaultBasket = !getStr('--symbols=', '');
+  const tag = getStr('--tag=', '') || (isDefaultBasket ? '' : '-u' + fingerprint(SYMBOLS));
+  const out = `robustgate-${TOURNAMENT}-${quote}${tag}${LONG_ONLY ? '-longonly' : ''}.json`;
   fs.writeFileSync(out, JSON.stringify({
     tournament: TOURNAMENT, months: MONTHS, folds: FOLDS, perms: perms.length, seed: SEED,
     bootstrapIters: BOOT, longOnly: LONG_ONLY, symbols: SYMBOLS, permutations: perms, rows,

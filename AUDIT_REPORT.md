@@ -842,3 +842,125 @@ con su propia carga de la prueba.
 
 Queda implementado y **apagado**, como `rotationDailyRiskOff`: el valor es el número medido, no la
 opción. Ninguna regla de trading modificada. Tests: **90 en verde** (4 nuevos cubren el stop del largo).
+
+---
+
+## 18. Investigación de estrategias nuevas — y el gate resulta depender del universo (2026-09-05)
+
+Encargo: buscar estrategias nuevas de señal para el bot. Dos candidatas medidas bajo el gate
+robusto (8 permutaciones, semilla 42, 42 m / 8 folds, canal diario long-only). **Cero adopciones**,
+y por el camino un hallazgo de método que afecta a TODAS las decisiones anteriores.
+
+### 18.1 `MACRO_OSC` (V7) — estaba implementada y NUNCA medida
+
+Presente desde el commit `abfa3691` en `indicators.js`, `backtestEngine.js` (case `MACRO_OSC`) y
+`backtest.js` (`--v7`), con 82 líneas de test. **No aparecía en esta auditoría ni tenía resultados
+archivados.** En `dailyBot.js:4` está importada pero **no se usa** — import muerto; la señal viva
+sigue siendo `evaluateStrategySMA200`. Candidata legítima porque su salida `isPurpleTakeProfit`
+corta por sobreextensión del oscilador, muy por delante del cruce de la SMA150 (la debilidad §17).
+
+Rejilla pre-registrada con control de meseta sobre `purpleZoneThreshold` (22/28/34) y **mismo
+`bufferSize`/`minCandles` en todas las variantes**, baseline incluida: con arranques distintos la
+comparación mediría fechas de inicio, no estrategias.
+
+| variante | Δ media large-caps USDC | Δ media large-caps USDT |
+|---|---|---|
+| MACRO_OSC p28 (default) | −0,39 [−1,27, +0,36] · P 0,19 | −1,43 [−3,82, +0,27] · P 0,08 |
+| MACRO_OSC p22 | +0,56 [−0,73, +1,97] · P 0,77 | −1,24 [−3,60, +0,59] · P 0,13 |
+| MACRO_OSC p34 | −0,11 [−1,16, +0,92] · P 0,44 | −1,12 [−3,49, +0,68] · P 0,18 |
+
+**🔻 RECHAZADA**, veredicto coincidente, y el peor fold empeora en las seis celdas. Sin meseta: los
+deltas van −0,39 → +0,56 → −0,11 al mover el umbral, que es ruido, no estructura.
+
+**Aviso de lectura, idéntico al caso κ de §15:** el Calmar MEDIANO *sube* en las tres variantes
+(2,95 → 3,05/3,05/3,11 en USDC; 1,27 → 2,18/2,17 en USDT) mientras la Δ pareada es negativa. Quien
+mire solo la mediana adoptaría una estrategia que, fold a fold, pierde.
+
+**Qué es en realidad** (walk-forward directo, USDC large-caps):
+
+| | trades | ROI por fold |
+|---|---|---|
+| baseline SMA150 | 107 | 0 · 0 · 2,2 · **63,4** · −2,9 · −20,2 · 8,6 |
+| MACRO_OSC p28 | **27** | 0 · 0 · 0 · **40,4** · +16,5 · −15,7 · 1,4 |
+
+Opera **4× menos**, cede 23 puntos del mejor fold (la cola derecha) y mejora los dos malos. Es
+**protección de drawdown, no alfa** — la misma firma que Donchian en §14.4 (WR 19→47 %, ROI −60 %).
+La predicción pre-registrada ("ROI baja") se cumple en suma (51,1 → 42,6); sobre la MEDIANA no es
+evaluable: vale 0 en ambas por los folds planos. Se reporta así, sin redondear a favor.
+
+### 18.2 Salida asimétrica (SMA rápida) — el experimento que descompone el lag
+
+`evaluateStrategySMA200` usaba UN solo periodo para entrar y salir. Se añade `exitSmaPeriod`
+(default `undefined` = comportamiento histórico exacto, 90/90 tests en verde): la SMA lenta decide
+SI se puede estar largo, una rápida decide CUÁNDO salir; se reentra al recuperar la rápida, para no
+pagar un round-trip cada dip. Es la prueba limpia de la hipótesis del lag: **solo cambia la salida.**
+
+| variante | large-caps USDC | large-caps USDT |
+|---|---|---|
+| SALIDA SMA100 | −0,19 [−0,89, +0,55] · P 0,30 | −0,16 [−0,75, +0,52] · P 0,30 |
+| SALIDA SMA75 | **−0,57 [−0,88, −0,25]** · P 0,00 | **−0,28 [−0,55, −0,05]** · P 0,01 |
+| SALIDA SMA50 | −0,07 [−0,36, +0,26] · P 0,33 | −0,04 [−0,31, +0,24] · P 0,36 |
+
+**🔻 RECHAZADA.** En SMA75 el IC queda **enteramente por debajo de cero en las dos muestras**: no es
+"ausencia de mejora", es **evidencia positiva de daño**. Y el peor fold empeora siempre
+(−1,71 → −1,84/−2,31/−2,31).
+
+**Predicción propia falsada, y así se reporta.** Se predijo "mejor peor-fold, más turnover". El
+turnover NO se dispara (117 → 111 → 125 trades) y el peor fold mejora en **ROI** (−20,2 → −16,4)
+pero empeora en **Calmar**, que es la métrica del gate: se pierde menos, por un camino de drawdown
+peor. El ROI total cae 46,1 → 28,2 (SMA100) y 33,7 (SMA50).
+
+**Respuesta a la pregunta abierta de §17:** en la cesta de producción, acelerar la salida no ayuda.
+El lag de la SMA150 no es un coste recuperable por este camino.
+
+### 18.3 🔴 El veredicto se INVIERTE al cambiar el universo
+
+Mismo torneo, mismo gate, mismas permutaciones y mismo periodo, sobre 8 large-caps distintas
+(BNB, ATOM, UNI, FIL, AAVE, ETC, NEAR, APT):
+
+| variante | large-caps (producción) | universo disjunto |
+|---|---|---|
+| SALIDA SMA100 | −0,19 · P 0,30 · 🔻 | **+1,02 [+0,12, +2,13] · P 1,000 · ✅** |
+| SALIDA SMA75 | −0,57 · P 0,00 · 🔻 | **+0,83 [−0,18, +2,05] · P 0,927 · ✅** |
+| SALIDA SMA50 | −0,07 · P 0,33 · 🔻 | **+0,28 [−0,23, +0,93] · P 0,804 · ✅** |
+
+Las tres **suspenden** en la cesta de producción y las tres **aprueban** —una con P = 1,000— en un
+universo disjunto. No se adopta nada: **un efecto que cambia de signo con el universo no generaliza**,
+y la cesta que opera el bot es la primera. Puede ser economía real (las mid-caps revierten más
+bruscamente y salir antes compensa) o selección de universo; con 8 símbolos y series más cortas
+(APT/NEAR) esta muestra no lo distingue. Lo que sí queda establecido es la **fragilidad del gate**.
+
+### 18.4 El "criterio de doble muestra" no son dos muestras
+
+Las dos muestras de la casa son las mismas monedas cotizadas en otra stablecoin. Medido:
+
+| par | correlación de retornos diarios (n=399) |
+|---|---|
+| BTCUSDC vs BTCUSDT | **0,99995** |
+| ETHUSDC vs ETHUSDT | **0,99998** |
+| SOLUSDC vs SOLUSDT | **0,99997** |
+
+Por eso el peor fold sale **idéntico a dos decimales** entre "ambas muestras" en varios torneos.
+El criterio USDC/USDT es una comprobación de ruido de divisa y de vendedor de datos, **no una
+réplica independiente**. No invalida los rechazos pasados (rechazar en muestras correlacionadas
+sigue siendo rechazar), pero sí significa que **cualquier adopción futura justificada por "pasó en
+las dos muestras" descansaría de hecho sobre una sola** — y §18.3 muestra que es justo ahí donde el
+veredicto se da la vuelta.
+
+**Propuesta de regla (no aplicada por mi cuenta):** exigir para adoptar un universo genuinamente
+disjunto, no USDC/USDT. Es un endurecimiento del gate, y cambiar el criterio de adopción es
+decisión del dueño del capital.
+
+### 18.5 Defecto corregido — pérdida silenciosa de resultados
+
+El nombre del fichero de salida de `robustgate.js` solo miraba la divisa del primer símbolo, así
+que **dos universos distintos en la misma divisa escribían el MISMO fichero** y el segundo borraba
+al primero sin avisar. Se detectó en caliente: la corrida de §18.3 sobrescribió el resultado de
+large-caps. Corregido con una huella determinista del universo (`-u<hash>`) y `--tag=`; el archivo
+destruido se regeneró. Afectaba a la reproducibilidad del archivo de auditoría, no a las cifras.
+
+### 18.6 Qué NO se cambió
+
+Ninguna regla de trading. `MACRO_OSC` sigue sin cablear (y su import muerto en `dailyBot.js` queda
+señalado); `exitSmaPeriod` queda implementado y **apagado**, como `longStopPct` y
+`rotationDailyRiskOff`: el valor entregado es el número medido, no la opción. Tests: **93 en verde** (3 nuevos cubren la salida asimétrica).

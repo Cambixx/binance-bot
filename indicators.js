@@ -833,10 +833,29 @@ export function evaluateStrategySMA200(candles, opts = {}) {
   // y solo sale si close < sma*(1-band). band=0 → comportamiento histórico. Reduce el
   // whipsaw (cada round-trip in/out paga ~0.30%) cuando el cierre orbita la SMA.
   const band = opts.band ?? 0;
+  // SALIDA ASIMÉTRICA (candidata 2026-09-05). `exitSmaPeriod` desacopla el timing de salida del
+  // filtro de régimen: la SMA lenta sigue decidiendo SI se puede estar largo, y una SMA más
+  // rápida decide CUÁNDO salir. Ataca el lag identificado en §17 (el recorrido pico→SMA150 no
+  // está acotado). undefined = comportamiento histórico EXACTO (una sola SMA para ambos lados).
+  //
+  // Formulación coherente (evita el churn): se está DENTRO mientras el precio está por encima de
+  // AMBAS; se sale al perder la rápida; se reentra al recuperarla (con la lenta aún válida). Sin
+  // la condición de entrada sobre la rápida, cada caída bajo la SMA rápida saldría y recompraría
+  // al día siguiente pagando el round-trip.
+  const exitPeriod = opts.exitSmaPeriod;
   const { closes } = candles;
   if (closes.length < period + 1) return 'HOLD';
   const sma = smaLast(closes, period);
   const price = closes[closes.length - 1];
+
+  if (exitPeriod && closes.length >= exitPeriod + 1) {
+    const smaFast = smaLast(closes, exitPeriod);
+    // La SALIDA manda: si se ha perdido la rápida, se sale aunque la lenta siga alcista.
+    if (price < smaFast * (1 - band)) return 'SELL';
+    if (price > sma * (1 + band) && price > smaFast) return 'BUY';
+    return 'HOLD';
+  }
+
   if (price > sma * (1 + band)) return 'BUY';
   if (price < sma * (1 - band)) return 'SELL';
   return 'HOLD';
