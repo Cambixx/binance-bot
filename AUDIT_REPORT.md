@@ -781,3 +781,64 @@ anterior queda archivado en **`state-archive/`** — incluidas las 7 únicas ope
 ha tenido el bot (−422,86 USDC realizados), por si hay que volver a ellas.
 
 Tests: **81 en verde** (eran 61 al empezar la auditoría).
+
+---
+
+## 17. Stop de catástrofe del LARGO — torneo pre-registrado (2026-09-05)
+
+### Origen
+
+Revisión operativa: las 17 posiciones abiertas de los tres canales llevaban 3-7 días sin cerrarse.
+**No era un fallo.** Los tres canales abren con `regimeMode: true` / `exitMode: 'signal'`, donde la
+única salida es el cruce de la SMA150 (banda 0,75 %). Verificado contra mercado el 2026-09-05: las
+17 daban señal `BUY` con márgenes de +4,3 % a +111,6 % sobre su umbral de venta. El heartbeat
+(`2026-09-05T11:00Z`) y las entradas a `00:00:4x` confirman que el cron y la guarda de frescura
+funcionan. Lo que sí quedaba establecido es que **el recorrido pico→SMA no está acotado**: SOL
+entró a 105,63 con la SMA150 en 81,17 — un 30 % de margen por debajo antes de que la señal corte.
+
+### Hipótesis y rejilla (declaradas ANTES de correr)
+
+Simétrica a la del corto, que sí se adoptó (§L162) por pérdida no acotada. Predicción registrada:
+*mejora `worstFold`, Δ media ≈ 0 y por tanto P < 0,80 → no adoptable*. Rejilla: 15/20/25/30 %,
+cooldown 5 d (igual que el corto). Implementado en `backtestEngine.js` como `longStopPct` /
+`longStopCooldown`, **default 0** — el baseline es provablemente idéntico (86/86 tests en verde
+antes y después). Cooldown en mapa DEDICADO (`longCooldowns`): reutilizar `cooldowns` habría hecho
+que un stop de corto bloquease también la entrada larga, y la variante dejaría de ser un solo cambio.
+
+### Resultado — gate robusto, 8 permutaciones, semilla 42, 42 m / 8 folds
+
+| variante | canal LS: Δ media / IC / P | canal long-only: Δ media / IC / P |
+|---|---|---|
+| LONGSTOP 30 % | +0,00 [0,00, 0,00] · 0,000 | +0,00 [0,00, 0,00] · 0,000 |
+| LONGSTOP 25 % | +0,00 [0,00, 0,00] · 0,000 | +0,00 [0,00, 0,00] · 0,000 |
+| LONGSTOP 20 % | +0,00 [0,00, 0,00] · 0,000 | +0,00 [0,00, 0,00] · 0,000 |
+| LONGSTOP 15 % | +0,00 [0,00, 0,01] · 0,653 | +0,01 [0,00, 0,02] · 0,653 |
+
+**🔻 RECHAZADO en los cuatro niveles y en los dos canales.** Ruido por orden del array: 1,18 (LS) y
+0,07 (long-only) de Calmar mediano — el efecto medido está uno o dos órdenes de magnitud por debajo.
+
+### Por qué: el stop es INERTE, no perjudicial
+
+Conteo directo de salidas sobre 42 m × 8 símbolos (canal LS), que es el dato que explica la tabla:
+
+| longStopPct | trades | STOP_LOSS | de los cuales, del largo |
+|---|---|---|---|
+| off (baseline) | 182 | 2 | 0 (los 2 son del corto) |
+| 15 % | 181 | 4 | **2** |
+| 20 % | 182 | 3 | **1** |
+| 25 % | 182 | 3 | **1** |
+
+El stop del largo dispara **1-2 veces en 42 meses**. La razón es estructural: para perder 20 % desde
+la entrada, el precio casi siempre tiene que cruzar antes por debajo de una SMA de 150 días que en
+el momento de entrar estaba cerca — y entonces sale por `SIGNAL`, no por stop. Solo escapa a esa
+regla la entrada que ocurre muy por encima de la SMA (el caso SOL de arriba: reentrada tardía tras
+un bloqueo del gate BTC), y es rara.
+
+**Conclusión para el dueño del capital:** "los largos no llevan stop" es cierto y suena mal, pero
+ponerlo no cambia nada medible — la salida de régimen ya llega primero en ~99 % de los casos. El
+riesgo real de este diseño no es la ausencia de stop, es el **lag de la propia SMA150**, y eso no lo
+arregla un backstop: lo arreglaría una salida más rápida, que es un cambio de estrategia distinto y
+con su propia carga de la prueba.
+
+Queda implementado y **apagado**, como `rotationDailyRiskOff`: el valor es el número medido, no la
+opción. Ninguna regla de trading modificada. Tests: **90 en verde** (4 nuevos cubren el stop del largo).

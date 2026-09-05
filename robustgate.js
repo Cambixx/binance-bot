@@ -86,6 +86,20 @@ const TOURNAMENTS = {
     { name: 'EQUAL-N 5 plazas', opts: { ...BUF, ...BASE_GATE, sizeBasis: 'equalN', positionSlots: 5 } },
     { name: 'EQUITY basis (20%)', opts: { ...BUF, ...BASE_GATE, sizeBasis: 'equity' } },
   ],
+  // Stop de CATÁSTROFE del largo en modo régimen. REJILLA PRE-REGISTRADA (2026-09-05) antes de
+  // correr nada. Hipótesis: en `exitMode:'signal'` la única salida del largo es el cruce (laggy)
+  // de la SMA150, así que el recorrido pico→SMA no está acotado; un backstop lejano debería
+  // recortar el peor fold sin tocar la mediana (si toca la mediana, está cortando tendencias
+  // sanas y no es un backstop). Predicción declarada: mejora `worstFold`, Δ media ≈ 0 y por
+  // tanto P(Δ>0) < 0,80 → NO adoptable bajo el criterio vigente. Se mide para cuantificarlo,
+  // no para adoptarlo por sorpresa. Cooldown 5d, igual que el del corto.
+  longstop: [
+    { name: 'baseline SIN stop largo', opts: { ...BUF, ...BASE_GATE } },
+    { name: 'LONGSTOP 30%', opts: { ...BUF, ...BASE_GATE, longStopPct: 0.30, longStopCooldown: 5 } },
+    { name: 'LONGSTOP 25%', opts: { ...BUF, ...BASE_GATE, longStopPct: 0.25, longStopCooldown: 5 } },
+    { name: 'LONGSTOP 20%', opts: { ...BUF, ...BASE_GATE, longStopPct: 0.20, longStopCooldown: 5 } },
+    { name: 'LONGSTOP 15%', opts: { ...BUF, ...BASE_GATE, longStopPct: 0.15, longStopCooldown: 5 } },
+  ],
   circuitbreaker: [
     { name: 'baseline SIN cb', opts: { ...BUF, ...BASE_GATE, portfolioCircuitBreaker: null } },
     { name: 'CB 12% / 48h', opts: { ...BUF, ...BASE_GATE } },

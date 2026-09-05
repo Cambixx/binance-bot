@@ -119,3 +119,61 @@ test('evaluateFixedExit: orden TP → Trailing → SL', () => {
   d = evaluateFixedExit({ buyPrice: 100, peakPrice: 100, trailingActivated: false, trailingSL: 0 }, 96, params);
   assert.equal(d.action, 'STOP_LOSS');
 });
+
+// ── Stop de catástrofe del LARGO (candidata 2026-09-05, off por defecto) ──────────────────
+// Escenario: rampa larga (la SMA200 queda MUY por debajo) → entra caro; luego cae un 25 % pero
+// SIGUE por encima de la SMA, así que la señal continúa en BUY. Es el único hueco donde el stop
+// del largo puede actuar: si la caída cruzara la SMA, saldría por SIGNAL y el stop sobraría.
+// Nota de diseño (es el hallazgo del torneo §17, no un detalle de fixture): con la entrada pegada
+// al cruce, entryPrice ≈ SMA, así que un −20 % desde la entrada cae SIEMPRE por debajo de la SMA y
+// la posición sale por SIGNAL antes de que el stop pueda actuar. El único hueco real es la entrada
+// MUY por encima de la SMA — el caso SOL en vivo (reentrada tardía). Se reproduce con un salto:
+// 220 velas planas (SMA≈100) y salto a 500 → entra a 500 con la SMA aún en ~100.
+function rampThenDrop() {
+  const flat = Array.from({ length: 220 }, () => 100);
+  const jump = Array.from({ length: 20 }, () => 500);  // entra aquí: 500 con SMA200 ≈ 100
+  const drop = Array.from({ length: 20 }, () => 380);  // −24 % desde 500, pero aún ≫ SMA200
+  return makeDaily([...flat, ...jump, ...drop]);
+}
+const longStopEngineOpts = (extra) => ({
+  symbols: ['AAAUSDC'], interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal',
+  dataBySymbol: { AAAUSDC: rampThenDrop() }, bufferSize: 280, minCandles: 205,
+  regimeOpts: { smaPeriod: 200 }, oosSplitRatio: 0.95, ...extra,
+});
+
+test('longStopPct: default 0 deja el baseline INTACTO (no hay STOP_LOSS del largo)', async () => {
+  const engine = new BacktestEngine(longStopEngineOpts({}));
+  await engine.run();
+  const stops = engine.state.tradeHistory.filter(t => t.reason === 'STOP_LOSS');
+  assert.equal(stops.length, 0, 'sin longStopPct no debe haber ningún stop de largo');
+});
+
+test('longStopPct: corta el largo cuando cae el % fijado y la señal sigue en BUY', async () => {
+  const engine = new BacktestEngine(longStopEngineOpts({ longStopPct: 0.20, longStopCooldown: 5 }));
+  await engine.run();
+  const stops = engine.state.tradeHistory.filter(t => t.reason === 'STOP_LOSS');
+  assert.equal(stops.length, 1, 'debe dispararse exactamente un stop de largo');
+  // Y debe cortar en la caída, no antes: pérdida ≈ −24 % (más costes), nunca a favor.
+  // Ojo: el motor nombra el campo `profit`; `profitUSDC` es del estado live (shadowTrader).
+  assert.ok(stops[0].profit < 0, 'el stop cierra en pérdida');
+  assert.equal(stops[0].buyPrice, 500, 'entra en el salto, con la SMA200 aún ≈100');
+  assert.equal(stops[0].sellPrice, 380, 'corta en la caída, no en el cruce de la SMA');
+});
+
+test('longStopPct: un umbral más lejano que la caída NO dispara', async () => {
+  const engine = new BacktestEngine(longStopEngineOpts({ longStopPct: 0.50, longStopCooldown: 5 }));
+  await engine.run();
+  const stops = engine.state.tradeHistory.filter(t => t.reason === 'STOP_LOSS');
+  assert.equal(stops.length, 0, 'una caída del 24 % no puede activar un stop del 50 %');
+});
+
+test('longStopPct: el cooldown impide recomprar inmediatamente con la señal aún en BUY', async () => {
+  // Tras el stop la señal sigue en BUY (430 > SMA200): sin cooldown recompraría a la vela
+  // siguiente y el stop sería puro coste. Con cooldown 5, a lo sumo reentra una vez en 20 velas.
+  const withCd = new BacktestEngine(longStopEngineOpts({ longStopPct: 0.20, longStopCooldown: 5 }));
+  await withCd.run();
+  const sinCd = new BacktestEngine(longStopEngineOpts({ longStopPct: 0.20, longStopCooldown: 0 }));
+  await sinCd.run();
+  assert.ok(withCd.state.tradeHistory.length <= sinCd.state.tradeHistory.length,
+    'el cooldown no puede aumentar el número de operaciones');
+});

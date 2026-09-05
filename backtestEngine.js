@@ -68,6 +68,17 @@ class BacktestEngine {
     //  - shortTrailAtr (k): Chandelier del corto — cubrir si close > minLow + k·ATR14. 0 = off.
     //  - shortTimeStopDays: cubrir si a los N días el corto no acumula beneficio. 0 = off.
     this.shortTrailAtr = options.shortTrailAtr ?? LONGSHORT.shortTrailAtr ?? 0;
+    // Stop de CATÁSTROFE del LARGO en modo régimen (exitMode 'signal'). Candidata 2026-09-05.
+    // Motivación simétrica a la del corto: en `signal` la ÚNICA salida es el cruce de la SMA150,
+    // que es laggy por construcción — un largo puede recorrer todo el camino desde su pico hasta
+    // la SMA sin que nada lo corte. A diferencia del corto la pérdida SÍ está acotada (−100 %),
+    // por eso esto es protección de DRAWDOWN, no de ruina, y por eso nace APAGADA (0 = off,
+    // baseline = producción actual) hasta que pase el gate robusto de la casa.
+    // El cooldown es imprescindible: sin él la señal (que sigue en BUY bajo la SMA) recompraría
+    // a la vela siguiente y el stop solo quemaría costes de round-trip.
+    // ⚠️ longStopCooldownDays↔velas solo es 1:1 en interval '1d' (la familia diaria).
+    this.longStopPct = options.longStopPct ?? 0;
+    this.longStopCooldown = options.longStopCooldown ?? 0;
     this.shortTimeStopDays = options.shortTimeStopDays ?? LONGSHORT.shortTimeStopDays ?? 0;
     // Multiplicadores de exposición del corto (seguros de cola, research #7a/#6): reducen el
     // tamaño del corto en pánico BTC o funding persistentemente negativo. null = off.
@@ -176,7 +187,12 @@ class BacktestEngine {
       openPositions: {},
       tradeHistory: [],
       equityCurve: [],
-      cooldowns: {}
+      cooldowns: {},
+      // Cooldown DEDICADO del stop de catástrofe del largo. Mapa aparte a propósito: reutilizar
+      // `cooldowns` acoplaría el stop del largo con el del corto (un stop de corto pasaría a
+      // bloquear también la entrada larga) y la variante dejaría de ser UN solo cambio. Con
+      // longStopPct=0 este mapa queda siempre vacío → el baseline es provablemente idéntico.
+      longCooldowns: {}
     };
 
     // Trackers de drawdown a RESOLUCIÓN COMPLETA (fix #1): el equityCurve almacenado se
@@ -355,6 +371,9 @@ class BacktestEngine {
       if (this.state.cooldowns[symbol] && this.state.cooldowns[symbol] > 0) {
         this.state.cooldowns[symbol]--;
       }
+      if (this.state.longCooldowns && this.state.longCooldowns[symbol] > 0) {
+        this.state.longCooldowns[symbol]--;
+      }
 
       if (buf.closes.length < this.minCandles) continue;
 
@@ -380,6 +399,24 @@ class BacktestEngine {
 
       const hasPosition = !!this.state.openPositions[symbol];
       const isOnCooldown = this.state.cooldowns[symbol] && this.state.cooldowns[symbol] > 0;
+
+      // ── Stop de CATÁSTROFE del LARGO (candidata 2026-09-05; off por defecto) ──
+      // Se evalúa ANTES de la señal, igual que el del corto, para que una posición cortada no
+      // pase además por la lógica de flip/piramidación en la misma vela. Cubre los DOS canales
+      // (long-only y long/short) desde un único punto → sin divergencia entre ellos.
+      if (this.longStopPct > 0 && this.exitMode === 'signal' && hasPosition) {
+        const lp = this.state.openPositions[symbol];
+        if (lp && lp.side !== 'short' && close <= (lp.entryPrice ?? lp.buyPrice) * (1 - this.longStopPct)) {
+          this.executeSell(symbol, close, time, 'STOP_LOSS');
+          // Después de executeSell: su rama STOP_LOSS ya escribe `cooldowns`, y aquí se fija el
+          // cooldown propio del largo, que es el que gobierna la reentrada.
+          this.state.longCooldowns[symbol] = this.longStopCooldown;
+          this.trackDrawdown(time, currentPrices);
+          this.recordEquity(time, currentPrices);
+          continue;
+        }
+      }
+      const longOnCooldown = !!(this.state.longCooldowns && this.state.longCooldowns[symbol] > 0);
 
       if (this.longShort && this.exitMode === 'signal') {
         // ALWAYS-IN long/short: la señal dicta el lado. BUY → largo (cierra corto previo);
@@ -412,7 +449,7 @@ class BacktestEngine {
         if (signal === 'BUY') {
           if (pos && pos.side === 'short') this.executeShortClose(symbol, close, time, 'SIGNAL');
           const cur = this.state.openPositions[symbol];
-          if (!cur && this.canOpenPosition(currentPrices) && this.longEntryAllowed() && this.donchianLongAllowed(buf)) {
+          if (!cur && !longOnCooldown && this.canOpenPosition(currentPrices) && this.longEntryAllowed() && this.donchianLongAllowed(buf)) {
             this.executeBuy(symbol, close, time, null, buf);
           } else if (cur && cur.side === 'long') {
             this.tryPyramidAdd(symbol, close, buf, currentPrices); // candidata pyramid (no-op si off)
@@ -429,7 +466,7 @@ class BacktestEngine {
       }
 
       // Lógica de Compra (con caps de cartera, fix #26)
-      if (signal === 'BUY' && !hasPosition && !isOnCooldown && this.canOpenPosition(currentPrices) && this.longEntryAllowed() && this.donchianLongAllowed(buf)) {
+      if (signal === 'BUY' && !hasPosition && !isOnCooldown && !longOnCooldown && this.canOpenPosition(currentPrices) && this.longEntryAllowed() && this.donchianLongAllowed(buf)) {
         // Si modo ATR, anclar SL/peak iniciales con ATR del momento
         const entryATR = this.exitMode === 'atr'
           ? this.getCurrentATR(buf)
