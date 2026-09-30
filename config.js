@@ -87,9 +87,13 @@ export const RISK = {
 export const SIZING_BASIS = 'cash';
 
 // ─────────────────────────── Banda de histéresis (familia diaria) ───────────────────────────
-// Evita whipsaw en torno a la SMA (auditoría #11 / mejora 2026-07-24): solo entra si close > sma*(1+band)
-// y solo sale a cash si close < sma*(1-band). 0.0075 = 0.75% de histéresis.
-export const SMA_HYSTERESIS_BAND = 0.0075;
+// Solo entra si close > sma*(1+band) y solo sale a cash si close < sma*(1-band). 0 = sin banda.
+//
+// ⚠️ Auditoría 2026-09-29 (§20): estaba en 0.0075 desde el commit 815364c6 (24-jul), que la coló
+// sin torneo aunque §10 la había RECHAZADA con datos. Medida ahora con el gate robusto, baseline =
+// producción real, quitarla MEJORA el Calmar en las tres muestras (universo disjunto +0,08 P 0,94;
+// long-only +0,30 P 0,96; large-caps +0,15 P 0,79). Vuelve a 0. No subirla sin torneo pareado.
+export const SMA_HYSTERESIS_BAND = 0;
 
 
 // ─────────────────────────── Costes de transacción ───────────────────────────

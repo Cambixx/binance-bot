@@ -15,7 +15,8 @@
     "backtest": "node backtest.js",
     "shadow-report": "node shadow-report.js",
     "build-dashboard": "node build-dashboard-data.js",
-    "dashboard": "node build-dashboard-data.js && netlify dev"
+    "dashboard": "node build-dashboard-data.js && netlify dev",
+    "parity": "node parity-check.js"
   },
   "keywords": [],
   "author": "",

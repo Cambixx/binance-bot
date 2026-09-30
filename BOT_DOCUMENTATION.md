@@ -14,7 +14,7 @@ El bot está construido en Node.js y diseñado para ejecutarse como una **funci�
 
 `/status` en Telegram muestra los canales activos lado a lado.
 
-> **🔎 Auditoría LIVE 2026-06-19** (multi-agente, con backtests + verificación adversarial OOS): tras observar los 3 canales varios días. **SMA150-1d** (antes SMA200) mejora el riesgo-ajustado fuera de muestra: **Calmar 0.31→0.61, MaxDD −35.9%→−27.9%, holdout PF 0.80→1.55** (36m, cesta fija, costes 0.30%). **V4C-15m** deprecado a observación (sin edge). **ROT** confirmado (cash = gates funcionando). ⚠️ **Honestidad:** el holdout ROI del diario SIGUE siendo negativo (≈−13.5%) — el objetivo es **preservación de capital / mejor Calmar**, NO batir a BTC. El "positivo" live del diario es P&L **no realizado** (n=1 cerrado). **Gate de promoción a real:** ≥6-8 trades CERRADOS con PF>1; reportar siempre `realizedPnLUSDC`, nunca `totalProfitUSDC`.
+> **🔎 Auditoría LIVE 2026-06-19** (multi-agente, con backtests + verificación adversarial OOS): tras observar los 3 canales varios días. **SMA150-1d** (antes SMA200) mejora el riesgo-ajustado fuera de muestra: **Calmar 0.31→0.61, MaxDD −35.9%→−27.9%, holdout PF 0.80→1.55** (36m, cesta fija, costes 0.30%). **V4C-15m** deprecado a observación (sin edge). **ROT** confirmado (cash = gates funcionando). ⚠️ **Honestidad:** el holdout ROI del diario SIGUE siendo negativo (≈−13.5%) — el objetivo es **preservación de capital / mejor Calmar**, NO batir a BTC. El "positivo" live del diario es P&L **no realizado** (n=1 cerrado). **Gate de promoción a real:** ~~≥6-8 trades CERRADOS con PF>1~~ (sin potencia: con WR ~22 % y payoff ~5:1, 8 trades dan PF>1 el 52 % de las veces con el edge real y el 32 % sin edge; AUDIT_REPORT §20.4) → **paridad live↔motor** (`npm run parity`, §3.6). Reportar siempre `realizedPnLUSDC`, nunca `totalProfitUSDC`.
 
 > **🔎 Auditoría 2026-06-14:** auditoría profunda multi-agente (35 hallazgos verificados adversarialmente) + investigación cost-aware, con todas las correcciones y mejoras aplicadas. Ver **`AUDIT_REPORT.md`**. Cambios clave: paridad live↔backtest del trailing garantizada por `exits.js` (fuente única), MaxDrawdown medido por-vela, Sharpe/Sortino/Calmar computados de verdad, benchmark BTC HODL, lectura/escritura transaccional del estado, retry/backoff de la API, validación rigurosa (walk-forward / Monte Carlo / Deflated Sharpe / PBO) y suite de tests (`npm test`).
 
@@ -194,7 +194,7 @@ node sweep.js                                   # barrido de hipótesis + DSR + 
 | `--months=N` | `3` (SMA: 36) | Meses de historia a simular. |
 | `--symbols=A,B,..` | cesta fija large-caps | Universo explícito. |
 | `--universe=N` | — | ⚠️ Top-N dinámico de HOY (sesgo de supervivencia; etiquetado en el reporte). |
-| `--band=N` | `0` | Banda de histéresis SMA en % (ej. `--band=1`). |
+| `--band=N` | `config.SMA_HYSTERESIS_BAND` (0) | Banda de histéresis SMA en % (ej. `--band=1`). Vuelta a 0 el 2026-09-29: la de 0,75 % restaba en las tres muestras (§20). |
 | `--sma=N` | `config.SMA_PERIOD` | Periodo SMA explícito. |
 | `--oos-split=R` | `0.7` | Ratio train/holdout. |
 | `--fee=N` / `--slippage=N` | config | Costes por lado (%). `--no-costs` los anula (idealizado). |
@@ -225,6 +225,19 @@ Al abrirlo en el navegador verás:
 *   **`npm run validate`** — bootstrap de trades (IC del ROI, prob. de pérdida), **Deflated Sharpe** (corrige multiple-testing) y **Monte Carlo de permutación** (`--permute=N`, p-value vs azar).
 *   **`node sweep.js`** — barrido de hipótesis con costes + OOS + **Deflated Sharpe y PBO/CSCV** (probabilidad de overfitting).
 *   **`node abtest.js`** — ⭐ torneo de VARIANTES con walk-forward **pareado** (descarga los datos una vez) y el **gate de adopción** (Calmar mediano ≥ baseline, IQR ≤ baseline, peor fold no peor). La vara de medir de toda mejora nueva. Edita `VARIANTS` en el archivo para cada experimento. Núcleo reutilizable en `wfcore.js`. Así se validaron y adoptaron/rechazaron las mejoras del research (ver `AUDIT_REPORT.md` §9 y `RESEARCH_MEJORAS_2026-07.md`).
+
+### 3.6 Gate de promoción por PARIDAD (`parity.js` / `parity-check.js`, 2026-09-29)
+El shadow no puede validar el EDGE en un plazo razonable (hacen falta ~60 trades ≈ 3 años), pero sí la
+EJECUCIÓN: si el bot en vivo hace lo mismo que el motor sobre el que se validó la estrategia, el
+walk-forward del motor es evidencia aplicable; si no, no lo es.
+```bash
+npm run sync
+npm run parity -- --state=sync_ls.json --channel=ls      # o --channel=daily con sync_daily.json
+```
+Re-ejecuta el motor (mismo perfil que los bots, modo señal) sobre el periodo del estado y compara
+entradas, precio de entrada (umbral 0,5 %) y razón de salida. Sale con 0 (paridad), 1 (divergencia) o
+2 (sin datos). Lo que no casa es `liveOnly` (el live hizo algo que el motor no) o `engineOnly` (el live
+se saltó una señal: lo más grave). Las entradas del primer ciclo se excluyen (son de arranque).
 
 ---
 

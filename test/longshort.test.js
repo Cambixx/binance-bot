@@ -332,3 +332,103 @@ test('MANUAL_CLEANUP (mantenimiento) NO se registra como trabajo del bot; MANUAL
   assert.equal(s.botEntriesClosed, 1, 'la limpieza no acredita trabajo del bot');
   assert.equal(s.realizedPnLUSDC, '100.00', 'las dos mueven la caja igualmente');
 });
+
+// ───────────────────── Auditoría 2026-09-29: reentrada tras Chandelier y gate BTC de cortos ─────────────────────
+// Bajada → rebote que dispara el Chandelier → nueva bajada, todo MUY por debajo de la SMA150 (la
+// señal sigue en SELL de principio a fin). Aísla qué pasa después del TRAILING_STOP.
+function trailThenFallAgain() {
+  const down = Array.from({ length: 230 }, (_, i) => 300 - i);     // 300→71
+  const bounce = Array.from({ length: 8 }, (_, i) => 71 + i * 4);   // rebote → TRAILING_STOP
+  const fall = Array.from({ length: 30 }, (_, i) => 99 - i);        // vuelve a caer, aún bajo la SMA
+  return { AAAUSDC: makeDaily([...down, ...bounce, ...fall]) };
+}
+const trailOpts = (extra) => ({
+  symbols: ['AAAUSDC'], interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal',
+  longShort: true, shortStopPct: 0.25, shortTrailAtr: 3.0, shortEntry: {},
+  dataBySymbol: trailThenFallAgain(), bufferSize: 260, minCandles: 205, regimeOpts: { smaPeriod: 150 },
+  oosSplitRatio: 0.95, ...extra,
+});
+
+test('shortTrailReentry default (immediate): tras el Chandelier re-shortea con la señal aún en SELL', async () => {
+  const r = await new BacktestEngine(trailOpts({})).run();
+  const shorts = r.trades.filter(t => t.side === 'short');
+  assert.ok(shorts.some(t => t.reason === 'TRAILING_STOP'), 'el Chandelier debe disparar');
+  assert.ok(shorts.length >= 2, 'comportamiento histórico: vuelve a abrir corto tras el trail');
+});
+
+test('shortTrailReentry flat: tras el Chandelier NO re-shortea hasta que la señal salga de SELL', async () => {
+  const r = await new BacktestEngine(trailOpts({ shortTrailReentry: 'flat' })).run();
+  const shorts = r.trades.filter(t => t.side === 'short');
+  assert.equal(shorts.length, 1, 'un solo corto: el trail deja el símbolo en FLAT');
+  assert.equal(shorts[0].reason, 'TRAILING_STOP');
+});
+
+test('shortBtcGate: el gate BTC sobre cortos se puede aislar del gate de largos', async () => {
+  // BTC en tendencia alcista (risk-on) y una alt en bajista. Con el gate de cortos activo (default)
+  // la alt NO se shortea; con shortBtcGate:false sí, manteniendo el gate de largos intacto.
+  const btc = Array.from({ length: 260 }, (_, i) => 100 + i);
+  const alt = Array.from({ length: 260 }, (_, i) => 400 - i);
+  const base = {
+    symbols: ['BTCUSDC', 'AAAUSDC'], interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal',
+    longShort: true, shortTrailAtr: 0, shortEntry: {}, btcGateLong: { smaPeriod: 200 },
+    dataBySymbol: { BTCUSDC: makeDaily(btc), AAAUSDC: makeDaily(alt) },
+    bufferSize: 260, minCandles: 205, regimeOpts: { smaPeriod: 150 }, oosSplitRatio: 0.95,
+  };
+  const on = await new BacktestEngine(base).run();
+  const off = await new BacktestEngine({ ...base, shortBtcGate: false }).run();
+  const altShorts = (r) => r.trades.filter(t => t.symbol === 'AAAUSDC' && t.side === 'short').length;
+  assert.equal(altShorts(on), 0, 'BTC risk-on bloquea el corto de la alt (comportamiento actual)');
+  assert.ok(altShorts(off) >= 1, 'sin el gate de cortos, la alt se shortea');
+});
+
+// ───────────────────── Auditoría 2026-09-29: guarda de misma vela, funding real, niveles ─────────────────────
+test('exitedOnSameCandle: bloquea la reentrada en la vela de la salida y la libera en la siguiente', async () => {
+  const { exitedOnSameCandle } = await import('../indicators.js');
+  const DAY = 86400000, T = 1790553600000;
+  const last = { ETHUSDC: T };
+  assert.equal(exitedOnSameCandle(last, 'ETHUSDC', T), true, 'mismo cron, misma vela → bloqueado');
+  assert.equal(exitedOnSameCandle(last, 'ETHUSDC', T - DAY), true, 'una vela anterior también');
+  assert.equal(exitedOnSameCandle(last, 'ETHUSDC', T + DAY), false, 'vela siguiente → libre (como el motor)');
+  assert.equal(exitedOnSameCandle(last, 'SOLUSDC', T), false, 'otro símbolo no se ve afectado');
+  assert.equal(exitedOnSameCandle({}, 'ETHUSDC', T), false);
+  assert.equal(exitedOnSameCandle(undefined, 'ETHUSDC', T), false);
+});
+
+test('applySell corto: fundingCostUSDC inyectado sustituye al modelo plano; negativo = el corto cobra', () => {
+  const t = new ShadowTrader();
+  const mk = () => { const s = fakeSession(5000); t.applyShort(s, 'ETHUSDC', 2000, { signalMode: false, sizeFraction: 0.2 }); return s; };
+  const flat = mk(), paid = mk(), earned = mk();
+  t.applySell(flat, 'ETHUSDC', 2000, 'SIGNAL');
+  t.applySell(paid, 'ETHUSDC', 2000, 'SIGNAL', { fundingCostUSDC: 10 });
+  t.applySell(earned, 'ETHUSDC', 2000, 'SIGNAL', { fundingCostUSDC: -10 });
+  const pnl = (s) => s.state.tradeHistory[0].profitUSDC;
+  assert.ok(Math.abs((pnl(earned) - pnl(paid)) - 20) < 1e-6, 'la diferencia entre cobrar 10 y pagar 10 son 20 USDC');
+  assert.ok(pnl(paid) < pnl(flat) || Math.abs(pnl(paid) - pnl(flat)) < 10.5, 'el override manda sobre el plano');
+});
+
+test('applyShort: el mensaje da el stop duro y el Chandelier reales, no "sin TP/SL fijo"', async () => {
+  const { LONGSHORT } = await import('../config.js');
+  const t = new ShadowTrader();
+  const s = fakeSession(5000);
+  t.applyShort(s, 'ETHUSDC', 2000, { signalMode: false, sizeFraction: 0.2, smaPeriod: 150, atr: 60 });
+  const msg = s.notifications[0];
+  assert.doesNotMatch(msg, /sin TP\/SL fijo/);
+  assert.match(msg, /Stop duro/);
+  assert.ok(msg.includes((2000 * (1 + LONGSHORT.shortStopPct)).toFixed(4)), 'nivel del stop duro');
+  assert.match(msg, /Chandelier/);
+  assert.ok(msg.includes((2000 + LONGSHORT.shortTrailAtr * 60).toFixed(4)), 'nivel inicial del Chandelier');
+});
+
+test('motor: con el mismo timestamp, un símbolo listado ANTES que BTC ya ve el cierre de HOY en el gate BTC', async () => {
+  // La alt da BUY justo el último día; BTC pierde su SMA200 (y dispara el crash guard) ese mismo día.
+  // Antes, la alt (primera en el array) leía el buffer de BTC de AYER (risk-on) y abría largo.
+  const alt = [...Array.from({ length: 259 }, () => 100), 105];
+  const btc = [...Array.from({ length: 259 }, (_, i) => 100 + i), 50];
+  const engine = new BacktestEngine({
+    symbols: ['AAAUSDC', 'BTCUSDC'], interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal',
+    btcGateLong: { smaPeriod: 200 }, dataBySymbol: { AAAUSDC: makeDaily(alt), BTCUSDC: makeDaily(btc) },
+    bufferSize: 260, minCandles: 205, regimeOpts: { smaPeriod: 150, band: 0 }, oosSplitRatio: 0.95,
+  });
+  const r = await engine.run();
+  assert.equal(r.trades.filter(t => t.symbol === 'AAAUSDC').length, 0, 'BTC risk-off hoy debe bloquear el largo de la alt');
+});

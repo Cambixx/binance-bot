@@ -1001,3 +1001,170 @@ usa el patrón de sesión, cuyo commit condicional (`onlyIfMatch`) hace que un c
 falle en vez de pisarlo, avisando al usuario de que reintente. Alcance = `activeChannels()`.
 
 Tests: **96 en verde** (3 fijan los invariantes: el cierre manual mueve la caja, se registra como truncada, y NO se confunde con una limpieza administrativa).
+
+---
+
+## 20. Auditoría del algoritmo 2026-09-29 — producción ≠ lo que mide el gate
+
+Encargo: auditar el algoritmo y buscar mejoras. Se leyó el camino vivo completo (`trader-cron` →
+`dailyBot`/`longShortBot`/`rotationBot` → `shadowTrader`) contra el motor y el arnés de adopción,
+y cada sospecha se midió con datos antes de reportarla. **Ninguna regla de trading ni `config.js`
+se ha modificado**: lo aplicado son opciones del motor apagadas por defecto, un torneo nuevo y
+3 tests. Tests: **99 en verde**.
+
+### 20.1 🔴 Tres reglas vivas nunca pasaron por el gate — y una estaba rechazada
+
+| regla en producción | entró en | ¿torneo? |
+|---|---|---|
+| `SMA_HYSTERESIS_BAND = 0.0075` | `815364c6` (24-jul, commit de circuit breaker) | **No.** §10 la había **rechazado** y dejado en 0 |
+| Crash guard BTC −12 %/3 d | `815364c6` | No |
+| Gate BTC sobre **cortos** (`shortAllowedByBtc`) | `7a22be78` (27-ago, commit de dashboard, §13) | No — reacción a los squeezes de agosto |
+
+Además `wfcore.lsBaseEngineOpts` fija **`band: 0`** (`backtest.js`, `walkforward.js` y
+`validate.js` sí usan la banda de config). **Todos los torneos de `abtest.js`/`robustgate.js`
+desde el 24-jul han medido una estrategia que no es la que opera.** Y `shortAllowedByBtc` colgaba
+de `btcGateLong`: el torneo `btcgate_off` de §15 quitaba **dos** reglas a la vez.
+
+### 20.2 Torneo `unvalidated` — baseline = PRODUCCIÓN REAL, una regla por variante
+
+Gate robusto, 8 permutaciones, semilla 42, 42 m / 8 folds, funding real. Rejilla y predicción
+registradas en `robustgate.js` antes de correr. Universo disjunto = §18.3 **+ BTCUSDC** (sin BTC el
+gate BTC es fail-open y las variantes serían inertes).
+
+| variante | LS large-caps | LS universo disjunto | long-only large-caps |
+|---|---|---|---|
+| **SIN banda (band 0)** | +0,15 [−0,03, +0,48] · P 0,79 | **+0,08 [−0,01, +0,20] · P 0,94 ✅** | **+0,30 [−0,01, +0,76] · P 0,96 ✅** |
+| SIN crash guard | −0,01 · P 0,00 | −0,05 · P 0,31 · peor↓ | 0,00 (inerte) |
+| SIN gate BTC cortos | −0,02 [−0,47, +0,40] · P 0,48 | −0,22 [−0,75, +0,21] · P 0,20 · peor↓ | 0,00 (control ✔) |
+| CHANDELIER FLAT | **−1,40 [−3,58, −0,00] · P 0,02** | −0,10 · P 0,45 | 0,00 (control ✔) |
+| SIN chandelier | −0,86 [−2,05, +0,10] · P 0,05 | −0,08 · P 0,37 · peor↓ | 0,00 (control ✔) |
+
+Ruido por orden del array en el baseline: 0,91 (LS) · 0,21 (disjunto) · 0,02 (long-only).
+
+**Lectura:**
+- **La banda de 0,75 % resta en las tres muestras** (mismo signo en un universo genuinamente
+  disjunto, que es la réplica que §18.4 pedía) y quitarla pasa el gate en 2 de 3. Coincide con el
+  rechazo original de §10. **Recomendación: volver a `SMA_HYSTERESIS_BAND = 0`.**
+- **Crash guard y gate de cortos:** sin evidencia de que aporten, pero quitarlos empeora el peor
+  fold en el universo disjunto. Se pueden mantener: dejan de estar "sin medir" y pasan a "medidos,
+  neutros o con algo de protección de cola".
+- **Mi hipótesis sobre el Chandelier queda FALSADA.** Predije que el re-short inmediato era un
+  defecto; FLAT es peor (IC casi entero bajo cero) y quitar el Chandelier también. En el motor, el
+  valor del Chandelier viene *con* la reentrada al día siguiente. Pero ver 20.3.
+- **El universo disjunto rinde Calmar mediano −0,15** frente a 2,27 en la cesta de producción. El
+  edge del canal LS está muy concentrado en las 8 large-caps elegidas. Es selección de universo o
+  economía real, y esta muestra no lo distingue.
+
+### 20.3 🔴 Paridad rota: el live re-entra en la MISMA vela; el motor, en la siguiente
+
+Tras un `TRAILING_STOP`/`STOP_LOSS` el motor hace `continue` y el símbolo no vuelve a operar hasta
+la vela siguiente. El live corre cada 15 min sobre la **misma** vela cerrada, así que el ciclo
+siguiente reabre al **mismo precio**. Verificado en el estado real archivado (20-ago-2026): ETH y
+SOL se cubrieron por Chandelier a las 00:00:27 y se abrieron **largos a las 00:15:07 a 2251,72 y
+85,34, el precio exacto de salida**; §12 ya lo había visto ("stop ATR-trailing → re-short el mismo
+día") sin reconocerlo como divergencia. En el backtest (`signal-backtest-ls.json`) **38 de 65**
+Chandelier re-shortean a la vela siguiente.
+
+El beneficio medido en 20.2 corresponde a "salir y quedarse fuera un día". Lo que corre en vivo es
+"salir y volver a entrar al mismo precio": **un round-trip sin efecto, que ningún backtest ha
+medido**. **Recomendación:** en `longShortBot.js`, guardar la vela de la última salida por
+stop/trail y no abrir nada en ese símbolo mientras `candleTime` no la supere.
+
+### 20.4 🟡 El gate de promoción a capital real no tiene potencia
+
+Bootstrap sobre los trades de los backtests en modo señal (`signal-backtest-*.json`):
+
+| trades cerrados | P(PF>1) con el edge del backtest | P(PF>1) con edge **cero** |
+|---|---|---|
+| 8 (el gate actual) | 0,52 (LO) · 0,55 (LS) | 0,32 · 0,37 |
+| 30 | 0,68 · 0,67 | 0,39 · 0,39 |
+| 60 | 0,79 · 0,76 | 0,43 · 0,44 |
+
+Con WR ~22 % y payoff ~5:1, **8 trades es tirar una moneda**, y al ritmo del canal diario (~1,7
+cierres/mes) 60 trades son ~3 años. El shadow no puede validar el edge en un plazo razonable; sí
+puede validar la **ejecución**. **Recomendación:** que el gate de promoción sea de *paridad*
+(re-ejecutar el motor sobre el periodo live y exigir que cada señal live tenga su gemela en el
+motor el mismo día, a precio comparable) y que el juicio sobre el edge descanse en el walk-forward.
+
+### 20.5 🟢 Hallazgos menores
+
+- **Mensajes de Telegram del corto** dicen "sin TP/SL fijo", pero existen el Chandelier (3·ATR) y
+  el stop del 25 %. El dueño opera a mano con esos mensajes: debería recibir los niveles.
+- **Funding del corto:** el ledger live cobra el flat 0,03 %/día y el motor usa por defecto la
+  serie real, así que el P&L de cortos del live no es comparable con el backtest.
+- **Orden de eventos del motor:** con el mismo timestamp los símbolos se procesan en orden del
+  array y el gate BTC lee el buffer de BTC en ese momento. Los símbolos anteriores a BTC ven el
+  cierre de **ayer** (el live ve el de hoy). Es una fuente más del "ruido por orden" de §15.
+  Arreglo: empujar primero todas las velas de un timestamp y evaluar después.
+- **Calmar recortado a ±10** en `wfcore`: el fold 2 satura en todas las variantes y nunca aporta
+  información al delta pareado.
+
+### 20.6 Aplicado en este commit (sin cambio de comportamiento en vivo)
+
+- `backtestEngine.js`: `shortTrailReentry` (`'immediate'` por defecto | `'flat'`) y `shortBtcGate`
+  (`true` por defecto) para aislar la regla del corto del gate de largos.
+- `robustgate.js`: torneo `unvalidated` con baseline = producción real (`PROD_REGIME`).
+- Resultados archivados: `robustgate-unvalidated-usdc.json`, `-usdc-uyhd2tp.json`,
+  `-usdc-longonly.json`.
+- 3 tests nuevos en `test/longshort.test.js`.
+
+**Estado de las cuatro decisiones:** las cuatro se aplicaron después, a petición del dueño — ver §20.7.
+
+### 20.7 Aplicado a petición del dueño ("aplica todo", 2026-09-29) — SÍ cambia el comportamiento en vivo
+
+| # | Cambio | Dónde |
+|---|---|---|
+| 1 | **`SMA_HYSTERESIS_BAND` 0,0075 → 0** | `config.js`. Las posiciones abiertas cambian de comportamiento: un largo con cierre entre `SMA·(1−0,75 %)` y la SMA ahora sale, antes esperaba |
+| 2 | **Guarda de misma vela** tras stop/trail: no se reabre el símbolo hasta la vela siguiente | `longShortBot.js` + `indicators.exitedOnSameCandle`; estado persistido en `state.lastExitCandle` |
+| 3 | **Un único perfil de producción**: `lsBaseEngineOpts` lee la banda de config; 3 tests fallan si el arnés y los bots divergen | `wfcore.js`, `test/parity_profile.test.js` |
+| 4 | **Gate de promoción por paridad** | `parity.js` (puro) + `parity-check.js` (`npm run parity -- --state=sync_ls.json`) + 6 tests |
+| 5 | Funding **real** al cubrir un corto en el ledger (fallback al plano si falla la API) | `longShortBot.coverShort` → `applySell(..., {fundingCostUSDC})` |
+| 6 | Mensaje Telegram del corto con **stop duro y Chandelier reales** (nivel inicial ≈ entrada + 3·ATR14) | `shadowTrader.applyShort` |
+| 7 | **Orden de eventos del motor**: se ingieren todas las velas de un timestamp antes de decidir | `backtestEngine.js`. Cambia el backtest de referencia |
+| 8 | Pares con Calmar saturado en ±10 en baseline **y** variante se excluyen del bootstrap (`--keep-saturated` para restaurar) | `robustgate.js`, `wfcore.CALMAR_CLIP` |
+
+Tests: **112 en verde** (eran 96 al empezar la auditoría). El test de orden de eventos se comprobó
+contra el motor original: falla (`1 !== 0`) sin el arreglo y pasa con él.
+
+**Lo que NO se tocó:** `/cerrar` (webhook) sigue cubriendo cortos con el funding plano; el
+`dashboard-data.js` devenga el funding plano en la valoración de cortos abiertos.
+
+#### Resultado del torneo con el motor corregido (baseline = producción real, banda 0)
+
+Gate robusto, 8 permutaciones, semilla 42, 42 m / 8 folds. Δ de Calmar pareado [IC 95 %] · P(Δ>0):
+
+| variante | LS large-caps | LS universo disjunto | long-only large-caps |
+|---|---|---|---|
+| CON banda 0,75 % (la anterior) | −0,22 [−0,66, +0,04] · 0,14 | −0,10 [−0,23, +0,00] · 0,03 | −0,34 [−0,86, +0,01] · 0,04 |
+| SIN crash guard | −0,14 · 0,00 | −0,08 · 0,33 · peor↓ | 0,00 (inerte) |
+| SIN gate BTC cortos | −0,30 [−0,73, +0,15] · 0,09 | −0,30 [−0,87, +0,21] · 0,14 · peor↓ | 0,00 (control ✔) |
+| CHANDELIER FLAT | −1,40 [−3,95, −0,03] · 0,02 | −0,47 · 0,44 | 0,00 (control ✔) |
+| SIN chandelier | −1,21 [−2,31, −0,11] · 0,00 | +0,36 [−0,79, +2,11] · 0,64 · peor↓ | 0,00 (control ✔) |
+
+**Confirma lo decidido:** la banda antigua resta en las tres muestras (signo idéntico, incluido el
+universo disjunto), así que volver a 0 es correcto. Crash guard y gate de cortos se mantienen. La
+hipótesis "el re-short inmediato es un defecto" sigue falsada en el motor.
+
+**Ruido por orden — NO puedo afirmar que mejorase.** Baseline LS large-caps: 0,91 → **2,26**
+(disjunto 0,21 → 0,10; long-only 0,02 → 0,00). Las 8 permutaciones dan lo mismo en todos los folds
+salvo el 4 (Calmar 2,7–5,0); la mediana de 7 valores recoge justo ese fold. Es la escalera
+geométrica del sizing `cash` (H1), que no se ha tocado, y con este estadístico un cambio de banda
+basta para mover qué fold es la mediana. El arreglo del orden de eventos es correcto por
+construcción, pero **no hay evidencia de que reduzca el ruido medido**; la fuente dominante sigue
+siendo el sizing (`equalN`, no adoptado, §15).
+
+#### Primera prueba real del gate de paridad — estado live archivado (24-jul → 29-ago, banda 0,75 %)
+
+`node parity-check.js --state=state-archive/sync_ls_2026-08-29.json --band=0.75` → ❌ **DIVERGENCIA**, y
+las dos causas son defectos ya conocidos:
+
+| hallazgo | causa |
+|---|---|
+| **SOL: live 85,34 vs motor 87,64 (−2,62 %)**; LINK y ETH casan al 0,00 % | El live reabrió SOL en la misma vela del trail; el motor, a la siguiente (§20.3). **Corregido por la guarda #2** |
+| **3 señales del motor que el live se saltó** (BTC y XRP largos 20-ago, LTC 21-ago) | El estado tiene `circuitBreakerPausedUntil = 2026-08-30`: el breaker antiguo (mal medido, §14 H2: 14,07 % de "drawdown" falso sobre la caja) bloqueó las aperturas 10 días. **Corregido en §14 y inerte en modo señal** |
+
+Ninguna de las dos habría saltado con un gate de "≥8 cierres con PF>1"; el de paridad las encuentra
+en segundos. **Limitación:** solo 3 entradas comparables (las 7 cortas son del ciclo de arranque, que
+se excluye a propósito) y 0 salidas comparables, así que esto prueba que la herramienta funciona y
+detecta, no que el live actual tenga paridad. Hace falta volver a pasarla con estado live nuevo
+(`npm run sync` y `npm run parity -- --state=sync_ls.json`); los blobs se resetearon el 29-ago.

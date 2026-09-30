@@ -1,6 +1,6 @@
 import { getStore } from '@netlify/blobs';
 import telegramService from './telegramService.js';
-import { RISK, COSTS, INITIAL_BALANCE, PORTFOLIO_CIRCUIT_BREAKER, SIZING_BASIS, SIGNAL_MODE } from './config.js';
+import { RISK, COSTS, INITIAL_BALANCE, PORTFOLIO_CIRCUIT_BREAKER, SIZING_BASIS, SIGNAL_MODE, LONGSHORT } from './config.js';
 
 
 /**
@@ -336,12 +336,23 @@ class ShadowTrader {
     };
 
     const tag = telegramService.escape(symbol.replace('USDC', ''));
+    // Niveles REALES de salida del corto (auditoría 2026-09-29 §20.5): antes el mensaje decía "sin
+    // TP/SL fijo" pero existen el stop duro y el Chandelier, y el dueño opera a mano con este texto.
+    const stopPct = LONGSHORT.shortStopPct || 0;
+    const k = LONGSHORT.shortTrailAtr || 0;
+    const stopLine = stopPct > 0
+      ? `🛑 <b>Stop duro:</b> cubrir si cierra ≥ ${(price * (1 + stopPct)).toFixed(4)} (+${(stopPct * 100).toFixed(0)}%)\n` : '';
+    const atr = Number(options.atr);
+    const trailLine = k > 0
+      ? `📉 <b>Chandelier:</b> cubrir si cierra &gt; mínimo + ${k}·ATR14` +
+        (Number.isFinite(atr) && atr > 0 ? ` (nivel inicial ≈ ${(price + k * atr).toFixed(4)}, baja a medida que el precio hace mínimos)` : '') + `\n` : '';
     session.notifications.push(
       `🚨 <b>SEÑAL DE VENTA EN CORTO (SHORT)</b> · ${telegramService.escape(this.label)}\n\n` +
       `<b>Moneda:</b> #${tag}\n` +
       `<b>Precio Entrada (short):</b> ${price.toFixed(4)} USDC\n` +
       `<b>Tamaño sugerido:</b> ${sizeLabelS}\n\n` +
-      `📊 <b>Gestión:</b> mantener el corto mientras el cierre diario &lt; SMA${options.smaPeriod || 150}; cubrir/cerrar y pasar a largo si lo supera (sin TP/SL fijo).\n\n` +
+      `📊 <b>Gestión:</b> mantener el corto mientras el cierre diario &lt; SMA${options.smaPeriod || 150}; cubrir y pasar a largo si lo supera.\n` +
+      stopLine + trailLine + `\n` +
       `<i>Señal probabilística (lado corto NO validado a largo plazo). Neto de ~0.30% de costes.</i>`
     );
     console.log(`🟠 [${this.label}] SHORT ${symbol} a ${price} USDC (${sizeLabelS})`);
@@ -377,7 +388,11 @@ class ShadowTrader {
       // Timestamp inválido → 0 días (no NaN).
       const ts = new Date(position.timestamp).getTime();
       const daysHeld = Number.isFinite(ts) ? Math.max(0, (Date.now() - ts) / 86400000) : 0;
-      const fundingCost = position.investedUSDC * (COSTS.fundingDailyShort || 0) * daysHeld;
+      // `options.fundingCostUSDC` (firmado, + = paga) permite al caller inyectar el funding REAL del
+      // perp (paridad con el motor en modo 'real'); sin él, modelo plano.
+      const fundingCost = Number.isFinite(options.fundingCostUSDC)
+        ? options.fundingCostUSDC
+        : position.investedUSDC * (COSTS.fundingDailyShort || 0) * daysHeld;
       profitUSDC = proceedsEntry - costCover - fundingCost;
       profitPercentage = (profitUSDC / position.investedUSDC) * 100;
       returnUSDC = position.investedUSDC + profitUSDC; // margen + P&L

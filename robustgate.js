@@ -28,8 +28,8 @@
 import fs from 'fs';
 import BacktestEngine from './backtestEngine.js';
 import binance from './binanceService.js';
-import { runWalkForward, lsBaseEngineOpts } from './wfcore.js';
-import { isBlacklisted, MACRO_OSCILLATOR, SMA_PERIOD, STRATEGY_OPTS } from './config.js';
+import { runWalkForward, lsBaseEngineOpts, CALMAR_CLIP } from './wfcore.js';
+import { isBlacklisted, MACRO_OSCILLATOR, SMA_PERIOD, STRATEGY_OPTS, SMA_HYSTERESIS_BAND } from './config.js';
 
 const args = process.argv.slice(2);
 const getNum = (p, d) => { const a = args.find(x => x.startsWith(p)); return a ? parseFloat(a.split('=')[1]) : d; };
@@ -41,6 +41,11 @@ const PERMS = getNum('--perms=', 5);
 const BOOT = getNum('--boot=', 5000);
 const SEED = getNum('--seed=', 42);
 const LONG_ONLY = args.includes('--longonly');
+// Auditoría 2026-09-29 (§20.5): el fold 2 (arranque de la muestra, casi sin drawdown) satura el
+// Calmar en el recorte en TODAS las variantes → delta 0 exacto que solo diluye el bootstrap hacia
+// cero (sesgo conservador). Se excluye del bootstrap y se informa cuántos pares se descartaron.
+// `--keep-saturated` restaura el comportamiento anterior.
+const KEEP_SATURATED = args.includes('--keep-saturated');
 const TOURNAMENT = getStr('--tournament=', 'kappa');
 
 let SYMBOLS = (getStr('--symbols=', '') ? getStr('--symbols=', '').split(',')
@@ -49,6 +54,8 @@ let SYMBOLS = (getStr('--symbols=', '') ? getStr('--symbols=', '').split(',')
 
 const BUF = { bufferSize: 310 };
 const BASE_GATE = { btcGateLong: { smaPeriod: 200 } };
+// Régimen tal y como corre EN VIVO (dailyBot/longShortBot usan SMA_HYSTERESIS_BAND).
+const PROD_REGIME = { ...STRATEGY_OPTS, smaPeriod: SMA_PERIOD, band: SMA_HYSTERESIS_BAND };
 
 const TOURNAMENTS = {
   kappa: [
@@ -141,6 +148,26 @@ const TOURNAMENTS = {
     { name: 'SALIDA SMA100', opts: { ...BUF, ...BASE_GATE, regimeOpts: { ...STRATEGY_OPTS, smaPeriod: SMA_PERIOD, band: 0, exitSmaPeriod: 100 } } },
     { name: 'SALIDA SMA75', opts: { ...BUF, ...BASE_GATE, regimeOpts: { ...STRATEGY_OPTS, smaPeriod: SMA_PERIOD, band: 0, exitSmaPeriod: 75 } } },
     { name: 'SALIDA SMA50', opts: { ...BUF, ...BASE_GATE, regimeOpts: { ...STRATEGY_OPTS, smaPeriod: SMA_PERIOD, band: 0, exitSmaPeriod: 50 } } },
+  ],
+  // ══ REGLAS EN PRODUCCIÓN SIN TORNEO — REJILLA PRE-REGISTRADA 2026-09-29, antes de correr nada ══
+  // Tres reglas vivas entraron en commits de otra temática y nunca pasaron por el gate:
+  //   · banda de histéresis 0,75 % (815364c6) — §10 la había RECHAZADO y dejado en 0;
+  //   · crash guard BTC −12 %/3 d (815364c6);
+  //   · gate BTC sobre CORTOS (7a22be78, §13).
+  // Y `lsBaseEngineOpts` fija band: 0, así que todos los torneos desde el 24-jul miden una
+  // estrategia que NO es la que opera. Aquí el baseline es la PRODUCCIÓN REAL y cada variante
+  // quita UNA sola regla. Más la candidata FLAT tras el Chandelier del corto (ver motor).
+  // PREDICCIÓN: ninguna de las tres reglas muestra mejora detectable (P de quitarlas ≈ 0,5);
+  // FLAT recorta trades/costes con Δ Calmar incierta. Con --longonly las variantes del corto
+  // deben dar Δ = 0 exacto (control de que el cambio está aislado).
+  unvalidated: [
+    { name: 'baseline PRODUCCIÓN', opts: { ...BUF, ...BASE_GATE, regimeOpts: PROD_REGIME } },
+    // La banda ya está en 0 en producción (2026-09-29); esta variante mide la ANTERIOR (0,75 %).
+    { name: 'CON banda 0,75% (antigua)', opts: { ...BUF, ...BASE_GATE, regimeOpts: { ...PROD_REGIME, band: 0.0075 } } },
+    { name: 'SIN crash guard', opts: { ...BUF, btcGateLong: { smaPeriod: 200, crashGuardEnabled: false }, regimeOpts: PROD_REGIME } },
+    { name: 'SIN gate BTC cortos', opts: { ...BUF, ...BASE_GATE, regimeOpts: PROD_REGIME, shortBtcGate: false } },
+    { name: 'CHANDELIER FLAT', opts: { ...BUF, ...BASE_GATE, regimeOpts: PROD_REGIME, shortTrailReentry: 'flat' } },
+    { name: 'SIN chandelier', opts: { ...BUF, ...BASE_GATE, regimeOpts: PROD_REGIME, shortTrailAtr: 0 } },
   ],
   circuitbreaker: [
     { name: 'baseline SIN cb', opts: { ...BUF, ...BASE_GATE, portfolioCircuitBreaker: null } },
@@ -278,13 +305,17 @@ async function main() {
 
     if (r !== base) {
       const deltasByFold = {};
+      let saturated = 0;
       for (let pi = 0; pi < r.byPerm.length; pi++) {
         for (const f of Object.keys(r.byPerm[pi])) {
           const b = base.byPerm[pi]?.[f];
           if (b == null) continue;
-          (deltasByFold[f] ||= []).push(r.byPerm[pi][f] - b);
+          const v = r.byPerm[pi][f];
+          if (!KEEP_SATURATED && Math.abs(b) >= CALMAR_CLIP && Math.abs(v) >= CALMAR_CLIP) { saturated++; continue; }
+          (deltasByFold[f] ||= []).push(v - b);
         }
       }
+      row.saturatedPairs = saturated;
       const bs = clusterBootstrap(deltasByFold, BOOT, rnd);
       row.p = bs.p; row.meanDelta = bs.meanDelta; row.ci = bs.ci;
       const baseWorst = Math.min(...base.byPerm.flatMap(bf => Object.values(bf)));
@@ -307,6 +338,8 @@ async function main() {
       pad(r.p == null ? '—' : r.p.toFixed(3), 9) + r.verdict
     );
   }
+  const sat = rows.find(r => r.saturatedPairs > 0);
+  if (sat) console.error(`\nℹ️ ${sat.saturatedPairs} pares (permutación, fold) con Calmar saturado en ±${CALMAR_CLIP} en baseline Y variante se excluyeron del bootstrap (--keep-saturated para incluirlos).`);
   console.error(`\nRuido por ORDEN del array en el baseline: ${f2(rows[0].spreadByOrder)} de Calmar mediano.`);
   console.error('Criterio: P(mejora media > 0) ≥ 0,80 por bootstrap de clúster de fold, Y peor fold no peor.');
   console.error('El IQR se reporta pero NO veta: con ~7 folds no es estimable de forma fiable.');

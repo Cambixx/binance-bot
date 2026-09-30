@@ -1,5 +1,8 @@
 import BacktestEngine from './backtestEngine.js';
-import { VOLTARGET, LONGSHORT, STRATEGY_OPTS, SMA_PERIOD } from './config.js';
+import { VOLTARGET, LONGSHORT, STRATEGY_OPTS, SMA_PERIOD, SMA_HYSTERESIS_BAND } from './config.js';
+
+// El Calmar por fold se recorta a ±CALMAR_CLIP para que un DD casi nulo no domine la mediana.
+export const CALMAR_CLIP = 10;
 
 /**
  * Núcleo de walk-forward de VENTANA ANCLADA EXPANSIVA, reutilizable por walkforward.js y abtest.js.
@@ -40,7 +43,7 @@ export async function runWalkForward(dataBySymbol, cfg = {}) {
     } finally { console.log = orig; }
 
     const s = r.holdoutSummary || r.summary;
-    const calmarW = s.calmar == null ? null : Math.max(-10, Math.min(10, s.calmar));
+    const calmarW = s.calmar == null ? null : Math.max(-CALMAR_CLIP, Math.min(CALMAR_CLIP, s.calmar));
     rows.push({
       fold: i + 1,
       from: new Date(from).toISOString().slice(0, 10),
@@ -91,10 +94,13 @@ export function summarize(rows, opts = {}) {
 }
 
 // Config base del canal LS (reproduce el live) para las variantes de abtest.
+// ⚠️ Auditoría 2026-09-29 (§20.1): `band` estaba fijo en 0 mientras el live usaba 0,75 %, así que
+// todos los torneos desde el 24-jul medían una estrategia que no era la de producción. Ahora sale
+// de config; `test/parity_profile.test.js` falla si este perfil y los bots vuelven a divergir.
 export function lsBaseEngineOpts(extra = {}) {
   return {
     interval: '1d', strategyVersion: 'SMA200', exitMode: 'signal', longShort: true,
-    regimeOpts: { ...STRATEGY_OPTS, smaPeriod: SMA_PERIOD, band: 0 },
+    regimeOpts: { ...STRATEGY_OPTS, smaPeriod: SMA_PERIOD, band: SMA_HYSTERESIS_BAND },
     volTarget: { ...VOLTARGET, enabled: true },
     shortStopPct: LONGSHORT.shortStopPct, shortStopCooldown: LONGSHORT.shortStopCooldownDays,
     maxConcurrentPositions: LONGSHORT.maxConcurrentPositions, maxExposurePct: LONGSHORT.maxExposurePct,

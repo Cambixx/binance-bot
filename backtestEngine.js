@@ -68,6 +68,18 @@ class BacktestEngine {
     //  - shortTrailAtr (k): Chandelier del corto — cubrir si close > minLow + k·ATR14. 0 = off.
     //  - shortTimeStopDays: cubrir si a los N días el corto no acumula beneficio. 0 = off.
     this.shortTrailAtr = options.shortTrailAtr ?? LONGSHORT.shortTrailAtr ?? 0;
+    // Reentrada tras el Chandelier del corto (auditoría 2026-09-29). Medido sobre
+    // signal-backtest-ls.json: 38 de 65 salidas TRAILING_STOP re-shortean a la vela SIGUIENTE,
+    // porque la señal sigue en SELL y nada lo impide — el "stop" se reduce a re-anclar lowestLow
+    // pagando un round-trip. Es el mismo defecto que el comentario del stop del largo (abajo) ya
+    // describe para su caso. 'immediate' = comportamiento histórico. 'flat' = tras un
+    // TRAILING_STOP no se re-shortea ese símbolo hasta que la señal deje de ser SELL (el precio
+    // sale de la zona bajista de la banda) — el estado FLAT que §7 dejó como experimento pendiente.
+    this.shortTrailReentry = options.shortTrailReentry ?? 'immediate';
+    // Gate BTC sobre los CORTOS (añadido 2026-08-27, §13, sin torneo). Colgaba de `btcGateLong`,
+    // así que quitar el gate de largos quitaba también éste y el torneo `btcgate_off` medía dos
+    // cambios a la vez. true = comportamiento actual; false = aislar el efecto.
+    this.shortBtcGate = options.shortBtcGate ?? true;
     // Stop de CATÁSTROFE del LARGO en modo régimen (exitMode 'signal'). Candidata 2026-09-05.
     // Motivación simétrica a la del corto: en `signal` la ÚNICA salida es el cruce de la SMA150,
     // que es laggy por construcción — un largo puede recorrer todo el camino desde su pico hasta
@@ -192,7 +204,9 @@ class BacktestEngine {
       // `cooldowns` acoplaría el stop del largo con el del corto (un stop de corto pasaría a
       // bloquear también la entrada larga) y la variante dejaría de ser UN solo cambio. Con
       // longStopPct=0 este mapa queda siempre vacío → el baseline es provablemente idéntico.
-      longCooldowns: {}
+      longCooldowns: {},
+      // Símbolos en estado FLAT tras un Chandelier del corto (solo con shortTrailReentry 'flat').
+      shortFlat: {}
     };
 
     // Trackers de drawdown a RESOLUCIÓN COMPLETA (fix #1): el equityCurve almacenado se
@@ -347,25 +361,37 @@ class BacktestEngine {
 
     console.log(`📈 Procesando ${allEvents.length} eventos históricos...`);
 
-    for (const event of allEvents) {
+    // Auditoría 2026-09-29 (§20.5): con el mismo timestamp, los símbolos se procesaban en el orden
+    // del array y cada uno veía el buffer de BTC en ESE instante. Los anteriores a BTC leían el
+    // cierre de AYER en el gate BTC (el live ve el de hoy) → una fuente más del "ruido por orden"
+    // de §15. Ahora se ingieren primero TODAS las velas de un timestamp y solo después se decide.
+    const ingest = (ev) => {
+      const b = candleBuffers[ev.symbol];
+      b.closes.push(ev.close);
+      b.highs.push(ev.high);
+      b.lows.push(ev.low);
+      b.volumes.push(ev.volume);
+      currentPrices[ev.symbol] = ev.close;
+      if (ev.time > this.lastEventTime) this.lastEventTime = ev.time;
+      // Mantener buffer (configurable; V5 necesita >200 para EMA200)
+      if (b.closes.length > this.bufferSize) {
+        b.closes.shift();
+        b.highs.shift();
+        b.lows.shift();
+        b.volumes.shift();
+      }
+    };
+
+    for (let gi = 0; gi < allEvents.length; ) {
+      let gj = gi;
+      while (gj < allEvents.length && allEvents[gj].time === allEvents[gi].time) gj++;
+      const group = allEvents.slice(gi, gj);
+      gi = gj;
+      for (const ev of group) ingest(ev);
+
+      for (const event of group) {
       const { symbol, close, high, low, volume, time } = event;
       const buf = candleBuffers[symbol];
-      
-      buf.closes.push(close);
-      buf.highs.push(high);
-      buf.lows.push(low);
-      buf.volumes.push(volume);
-      currentPrices[symbol] = close;
-      if (time > this.lastEventTime) this.lastEventTime = time;
-
-      // Mantener buffer (configurable; V5 necesita >200 para EMA200)
-      const maxBuf = this.bufferSize;
-      if (buf.closes.length > maxBuf) {
-        buf.closes.shift();
-        buf.highs.shift();
-        buf.lows.shift();
-        buf.volumes.shift();
-      }
 
       // Decrementar cooldowns
       if (this.state.cooldowns[symbol] && this.state.cooldowns[symbol] > 0) {
@@ -441,11 +467,14 @@ class BacktestEngine {
           if (shortExit) {
             this.executeShortClose(symbol, close, time, shortExit);
             if (shortExit === 'STOP_LOSS') this.state.cooldowns[symbol] = this.shortStopCooldown;
+            if (shortExit === 'TRAILING_STOP' && this.shortTrailReentry === 'flat') this.state.shortFlat[symbol] = true;
             this.trackDrawdown(time, currentPrices);
             this.recordEquity(time, currentPrices);
             continue;
           }
         }
+        // El FLAT se levanta en cuanto la señal sale de la zona bajista (BUY o HOLD en la banda).
+        if (signal !== 'SELL' && this.state.shortFlat[symbol]) delete this.state.shortFlat[symbol];
         if (signal === 'BUY') {
           if (pos && pos.side === 'short') this.executeShortClose(symbol, close, time, 'SIGNAL');
           const cur = this.state.openPositions[symbol];
@@ -458,7 +487,8 @@ class BacktestEngine {
           if (pos && pos.side === 'long') this.executeSell(symbol, close, time, 'SIGNAL');
           // No re-shortear durante el cooldown post-stop, y solo si el filtro de entrada lo permite.
           const entryOk = shortEntryAllowed(buf.closes, { ...this.shortEntry, smaPeriod: this.regimeOpts.smaPeriod ?? 150 });
-          if (!this.state.openPositions[symbol] && !isOnCooldown && entryOk && this.canOpenPosition(currentPrices) && this.shortAllowedByBtc()) this.executeShortOpen(symbol, close, time, buf);
+          const shortFlat = !!this.state.shortFlat[symbol];
+          if (!this.state.openPositions[symbol] && !isOnCooldown && !shortFlat && entryOk && this.canOpenPosition(currentPrices) && this.shortAllowedByBtc()) this.executeShortOpen(symbol, close, time, buf);
         }
         this.trackDrawdown(time, currentPrices);
         this.recordEquity(time, currentPrices);
@@ -502,6 +532,7 @@ class BacktestEngine {
 
       this.trackDrawdown(time, currentPrices); // MaxDD a resolución completa (fix #1)
       this.recordEquity(time, currentPrices);  // curva submuestreada para el plot
+      }
     }
 
     // Cerrar posiciones al final usando el ÚLTIMO timestamp de vela (no Date.now(), fix #9):
@@ -552,6 +583,7 @@ class BacktestEngine {
   // abren largos nuevos. Sin datos suficientes de BTC → no bloquear (fail-open, igual que btcRegimeOn).
   // Gate maestro BTC para entradas CORTAS: si BTC está alcista (Risk-On), NO shortear altcoins.
   shortAllowedByBtc() {
+    if (!this.shortBtcGate) return true;
     if (!this.btcGateLong || !this._btcKey || !this._candleBuffers?.[this._btcKey]) return true;
     const c = this._candleBuffers[this._btcKey].closes;
     const smaPeriod = this.btcGateLong.smaPeriod ?? 200;

@@ -1,7 +1,7 @@
-import binance from './binanceService.js';
+import binance, { cumRateAt } from './binanceService.js';
 import { longShortTrader, isCircuitBreakerPaused, updateCircuitBreaker, computePortfolioEquity } from './shadowTrader.js';
 import telegramService from './telegramService.js';
-import { evaluateStrategySMA200, computeVolTargetWeight, shortEntryAllowed, calculateATR, btcRegimeOn, entriesAreFresh } from './indicators.js';
+import { evaluateStrategySMA200, computeVolTargetWeight, shortEntryAllowed, calculateATR, btcRegimeOn, entriesAreFresh, exitedOnSameCandle } from './indicators.js';
 import { isBlacklisted, SMA_HYSTERESIS_BAND, SMA_PERIOD, DAILY_BASKET, VOLTARGET, RISK, LONGSHORT, REGIME, ENTRY_FRESHNESS_HOURS, SIGNAL_MODE } from './config.js';
 
 /**
@@ -41,6 +41,11 @@ async function _runCycle() {
   };
 
   const cooldowns = session.state.cooldowns || (session.state.cooldowns = {});
+  // Vela de la última salida por stop/trail de cada símbolo (auditoría 2026-09-29 §20.3). El motor
+  // hace `continue` tras un stop y no re-entra hasta la vela SIGUIENTE; el cron corre cada 15 min
+  // sobre la MISMA vela cerrada, así que sin esta guarda el ciclo siguiente reabría al mismo precio
+  // de salida (ETH/SOL el 2026-08-20: cubiertos 00:00:27, reabiertos 00:15:07 a 2251,72 y 85,34).
+  const lastExitCandle = session.state.lastExitCandle || (session.state.lastExitCandle = {});
 
   const rawBySymbol = {};
   const toFetch = [...new Set([...monitored, ...(REGIME.btcEnabled ? [REGIME.btcSymbol] : [])])];
@@ -112,12 +117,14 @@ async function _runCycle() {
       }
       if (shortExit) {
         console.log(`${shortExit === 'STOP_LOSS' ? '🛑' : '📉'} [SMA${SMA_PERIOD}-LS] ${shortExit === 'STOP_LOSS' ? 'STOP' : 'TRAIL'} CORTO ${symbol} a ${price}`);
-        longShortTrader.applySell(session, symbol, price, shortExit);
+        await coverShort(session, symbol, price, shortExit);
+        lastExitCandle[symbol] = candleTime;
         if (shortExit === 'STOP_LOSS') cooldowns[symbol] = new Date(candleTime + LONGSHORT.shortStopCooldownDays * 86400000).toISOString();
         continue;
       }
     }
     const onCooldown = cooldowns[symbol] && new Date(cooldowns[symbol]).getTime() > candleTime;
+    const sameCandleAsExit = exitedOnSameCandle(lastExitCandle, symbol, candleTime);
     const inBasket = symbols.includes(symbol);
     const frac = sizeFracFor(closes);
 
@@ -127,7 +134,7 @@ async function _runCycle() {
     if (signal === 'BUY') {
       if (pos && pos.side === 'short') {
         console.log(`🟢 [SMA${SMA_PERIOD}-LS] FLIP a LARGO: cubrir corto ${symbol} a ${price}`);
-        longShortTrader.applySell(session, symbol, price, 'SIGNAL');
+        await coverShort(session, symbol, price, 'SIGNAL');
       }
       // Diagnóstico (auditoría 2026-07-24): antes, si una entrada elegible no se abría, no
       // quedaba rastro de POR QUÉ (silencio indistinguible de "todo va bien"). Cada gate ahora
@@ -135,6 +142,8 @@ async function _runCycle() {
       if (inBasket && !session.state.openPositions[symbol]) {
         if (!btcRiskOn) {
           // Ya logueado una vez por ciclo a nivel de gate global (evita repetirlo por símbolo).
+        } else if (sameCandleAsExit) {
+          console.log(`⏸️ [SMA${SMA_PERIOD}-LS] ${symbol} señal LARGO pero salió por stop/trail en esta misma vela → no se reabre hasta la siguiente (paridad con el motor)`);
         } else if (frac <= 0) {
           console.log(`⚪ [SMA${SMA_PERIOD}-LS] ${symbol} señal LARGO pero vol-target → peso 0 (no se abre)`);
         } else if (!fresh) {
@@ -158,6 +167,8 @@ async function _runCycle() {
       if (inBasket && !session.state.openPositions[symbol]) {
         if (btcRiskOn) {
           console.log(`⛔ [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO bloqueada por Gate Macro BTC (BTC está alcista/Risk-On → no shortear)`);
+        } else if (sameCandleAsExit) {
+          console.log(`⏸️ [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO pero salió por stop/trail en esta misma vela → no se reabre hasta la siguiente (paridad con el motor)`);
         } else if (onCooldown) {
           console.log(`⏳ [SMA${SMA_PERIOD}-LS] ${symbol} en cooldown post-stop (no re-shortear)`);
         } else if (!entryOk) {
@@ -170,7 +181,11 @@ async function _runCycle() {
           console.log(`🚫 [SMA${SMA_PERIOD}-LS] ${symbol} señal CORTO bloqueada por circuit breaker o cap de exposición/posiciones`);
         } else {
           console.log(`🟠 [SMA${SMA_PERIOD}-LS] CORTO ${symbol} a ${price}`);
-          longShortTrader.applyShort(session, symbol, price, { regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: shortFrac });
+          const atrArr = calculateATR(highs, lows, closes, 14);
+          longShortTrader.applyShort(session, symbol, price, {
+            regimeMode: true, smaPeriod: SMA_PERIOD, sizeFraction: shortFrac,
+            atr: atrArr.length ? atrArr[atrArr.length - 1] : null,
+          });
         }
       }
     }
@@ -178,6 +193,28 @@ async function _runCycle() {
 
   await longShortTrader.commitSession(session);
   console.log(`✅ [SMA${SMA_PERIOD}-LS] Ciclo terminado.`);
+}
+
+/**
+ * Cubre un corto cobrando el funding REAL firmado del perp (auditoría 2026-09-29 §20.5). El ledger
+ * usaba el 0,03 %/día plano mientras el motor usa por defecto la serie real, así que el P&L de los
+ * cortos live no era comparable con el backtest. Misma fórmula que `shortFundingCost` del motor.
+ * Si la API falla o el símbolo no tiene perp, cae al modelo plano del ledger.
+ */
+async function coverShort(session, symbol, price, reason) {
+  const pos = session.state.openPositions[symbol];
+  let fundingCostUSDC;
+  if (pos) {
+    try {
+      const from = new Date(pos.timestamp).getTime();
+      const now = Date.now();
+      if (Number.isFinite(from)) {
+        const series = (await binance.getFundingCumSeries([symbol], from - 9 * 3600000, now))[symbol];
+        if (series) fundingCostUSDC = -pos.investedUSDC * (cumRateAt(series, now) - cumRateAt(series, from));
+      }
+    } catch (_) { /* fallback plano */ }
+  }
+  return longShortTrader.applySell(session, symbol, price, reason, { fundingCostUSDC });
 }
 
 // Cap de exposición en LIVE (auditoría #4): porta la guarda que el motor ya aplica, para que el

@@ -1151,6 +1151,17 @@ export function entriesAreFresh(rawKlines, maxHours = 6, now = Date.now()) {
   return ageHours <= maxHours;
 }
 
+/**
+ * ¿Salió este símbolo por stop/trail en la vela `candleTime` (o una posterior a ella)?
+ * El motor de backtest no re-entra tras un stop hasta la vela SIGUIENTE; el cron live corre cada
+ * 15 min sobre la MISMA vela cerrada, así que sin esta guarda reabría al mismo precio de salida
+ * (auditoría 2026-09-29 §20.3). Pura: `lastExitCandle` es { SYMBOL: openTime de la vela de salida }.
+ */
+export function exitedOnSameCandle(lastExitCandle, symbol, candleTime) {
+  const t = lastExitCandle && lastExitCandle[symbol];
+  return t != null && Number.isFinite(t) && candleTime <= t;
+}
+
 // ============================================================
 //  MACRO OSCILLATOR & ANTI-FOMO (Videos 1 & 2)
 // ============================================================
